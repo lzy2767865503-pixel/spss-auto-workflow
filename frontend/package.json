@@ -1,0 +1,27 @@
+{
+  "name": "spss-auto-workflow",
+  "private": true,
+  "version": "1.0.0",
+  "description": "A beginner-friendly SPSS automation workbench for survey and research data.",
+  "author": "LAI ZEYU",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lzy2767865503-pixel/spss-auto-workflow.git"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.5"
+  }
+}

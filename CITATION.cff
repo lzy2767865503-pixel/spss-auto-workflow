@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "SPSS Auto Analysis Workbench"
+type: software
+authors:
+  - family-names: "Lai"
+    given-names: "Zeyu"
+version: 1.0.0
+date-released: 2026-07-25
+license: MIT
+repository-code: "https://github.com/lzy2767865503-pixel/spss-auto-workflow"
+url: "https://github.com/lzy2767865503-pixel/spss-auto-workflow"
+abstract: >-
+  A beginner-friendly local web application for configuring and running
+  reproducible IBM SPSS analyses from Excel, CSV, and SPSS datasets through
+  a visual workflow and SPSS embedded Python.
+keywords:
+  - SPSS
+  - Python
+  - survey analysis
+  - reliability analysis
+  - exploratory factor analysis
+  - regression
