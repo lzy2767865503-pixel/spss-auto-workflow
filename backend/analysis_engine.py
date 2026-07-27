@@ -268,9 +268,24 @@ def corrected_item_total(items: pd.DataFrame, item: str) -> float:
 
 
 def kmo_statistic(correlation: np.ndarray) -> float:
-    inverse = np.linalg.pinv(correlation)
-    scale = np.sqrt(np.outer(np.diag(inverse), np.diag(inverse)))
-    partial = -inverse / scale
+    if (
+        correlation.ndim != 2
+        or correlation.shape[0] != correlation.shape[1]
+        or not np.isfinite(correlation).all()
+    ):
+        return float("nan")
+    # NumPy 2.0 may emit low-level matmul warnings while computing a valid
+    # pseudoinverse on highly correlated survey items. Validate the result
+    # explicitly instead of leaking those implementation warnings to users.
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        inverse = np.linalg.pinv(correlation)
+    if not np.isfinite(inverse).all():
+        return float("nan")
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        scale = np.sqrt(np.outer(np.diag(inverse), np.diag(inverse)))
+        partial = -inverse / scale
+    if not np.isfinite(partial).all():
+        return float("nan")
     np.fill_diagonal(partial, 0)
     corr_sq = correlation**2
     partial_sq = partial**2
@@ -663,6 +678,48 @@ finally:
 END PROGRAM.
 """
     syntax_path.write_text(syntax, encoding="utf-8")
+    portable_token = "__SPSS_OUTPUT_DIR__"
+    portable_template = syntax.replace(str(output_dir), portable_token)
+    (output_dir / "run_with_spss_python_portable.sps.in").write_text(
+        portable_template, encoding="utf-8"
+    )
+    (output_dir / "prepare_portable_spss_run.py").write_text(
+        """from pathlib import Path
+
+root = Path(__file__).resolve().parent
+template = root / "run_with_spss_python_portable.sps.in"
+destination = root / "run_with_spss_python_portable.sps"
+portable_root = str(root).replace("\\\\", "/")
+if "'" in portable_root or '"' in portable_root:
+    raise SystemExit(
+        "Move the extracted bundle to a folder whose path contains no quote characters."
+    )
+content = template.read_text(encoding="utf-8")
+content = content.replace("__SPSS_OUTPUT_DIR__", portable_root)
+destination.write_text(content, encoding="utf-8")
+print(f"Prepared: {destination}")
+print("Open this .sps file in IBM SPSS Statistics and choose Run > All.")
+""",
+        encoding="utf-8",
+    )
+    (output_dir / "PORTABLE_SPSS_README.md").write_text(
+        """# Re-run This Bundle on Another Mac
+
+The automatically executed `run_with_spss_python.sps` records the original
+job path. To prepare an equivalent syntax file after moving or extracting this
+bundle:
+
+```bash
+python3 prepare_portable_spss_run.py
+```
+
+Open `run_with_spss_python_portable.sps` in a licensed IBM SPSS Statistics
+installation, then choose **Run > All**. Keep `prepared_data.csv` in this same
+folder. The helper only rewrites local paths; it does not upload data or call a
+network service.
+""",
+        encoding="utf-8",
+    )
     return syntax_path
 
 
@@ -752,7 +809,18 @@ end tell
 
 def make_bundle(output_dir: Path) -> Path:
     bundle = output_dir / "SPSS_自动分析完整产出.zip"
-    include_suffixes = {".csv", ".json", ".md", ".sps", ".sav", ".spv", ".pdf", ".txt"}
+    include_suffixes = {
+        ".csv",
+        ".json",
+        ".md",
+        ".sps",
+        ".sav",
+        ".spv",
+        ".pdf",
+        ".txt",
+        ".py",
+        ".in",
+    }
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(output_dir.iterdir()):
             if path == bundle or not path.is_file() or path.suffix.lower() not in include_suffixes:

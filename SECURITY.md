@@ -14,5 +14,12 @@ Before sharing a repository copy, confirm that it does not contain:
 
 ## Reporting a Vulnerability
 
-Please open a GitHub issue containing a minimal reproduction that does not
-include sensitive data. Do not attach private datasets or credentials.
+Use the repository's **Security > Report a vulnerability** form so the report
+remains private until a fix is available:
+
+https://github.com/lzy2767865503-pixel/spss-auto-workflow/security/advisories/new
+
+Do not open a public issue for an unpatched vulnerability. Never attach private
+datasets, respondent records, SPSS licence information, or credentials. A
+minimal reproduction should use the committed synthetic fixture whenever
+possible.
