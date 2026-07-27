@@ -9,11 +9,15 @@
     "type": "git",
     "url": "https://github.com/lzy2767865503-pixel/spss-auto-workflow.git"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "check": "vite build"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

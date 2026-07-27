@@ -19,26 +19,32 @@ if [[ -z "$PYTHON_CANDIDATE" || ! -x "$PYTHON_CANDIDATE" ]]; then
   exit 1
 fi
 
+if ! "$PYTHON_CANDIDATE" -c 'import sys; raise SystemExit(sys.version_info < (3, 9))'; then
+  echo "Python 3.9 or newer is required."
+  exit 1
+fi
+
 if ! command -v npm >/dev/null 2>&1; then
   echo "npm was not found. Install Node.js 20 or newer and run this file again."
+  exit 1
+fi
+
+if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) < 20 ? 1 : 0)'; then
+  echo "Node.js 20 or newer is required."
   exit 1
 fi
 
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   "$PYTHON_CANDIDATE" -m venv "$VENV_DIR"
   "$VENV_DIR/bin/python" -m pip install --upgrade pip
-  "$VENV_DIR/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
 fi
 
-if ! "$VENV_DIR/bin/python" -c "import flask, pandas, pyreadstat" >/dev/null 2>&1; then
-  "$VENV_DIR/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
-fi
+"$VENV_DIR/bin/python" -m pip install --disable-pip-version-check \
+  -r "$APP_DIR/requirements.lock.txt"
 
-if [[ ! -f "$FRONTEND_DIR/dist/index.html" ]]; then
-  cd "$FRONTEND_DIR"
-  npm install
-  npm run build
-fi
+cd "$FRONTEND_DIR"
+npm ci
+npm run build
 
 cd "$APP_DIR"
 "$VENV_DIR/bin/python" "$APP_DIR/backend/app.py" &

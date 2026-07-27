@@ -53,7 +53,7 @@ Downloadable result bundle
 ### Requirements
 
 - macOS
-- Python 3.9 or newer
+- Python 3.9 or newer (Python 3.12 is the reference CI version)
 - Node.js 20 or newer
 - IBM SPSS Statistics with a valid licence for official `.spv`, PDF, and `.sav` outputs
 
@@ -80,13 +80,32 @@ SPSS_AUTO_PORT=8766 \
 
 The first automatic SPSS run may require macOS permission under **System Settings > Privacy & Security > Accessibility**.
 
+## Reproduce Without SPSS
+
+The repository includes a synthetic survey fixture, backend tests, a locked
+frontend dependency tree, and an automated verification script. This path does
+not need IBM SPSS or any private research data:
+
+```bash
+./scripts/verify.sh
+```
+
+The script creates an isolated Python environment, installs the declared
+dependencies, runs the backend and API tests, installs the exact frontend
+dependency versions from `package-lock.json`, and produces a production build.
+
+See [REPRODUCIBILITY.md](REPRODUCIBILITY.md) for the three verification levels:
+self-contained validation, local Python preview, and licensed SPSS execution.
+
 ## Development
 
 Backend:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+. .venv/bin/activate
+python -m pip install --upgrade pip
+.venv/bin/pip install -r requirements.lock.txt
 .venv/bin/python backend/app.py
 ```
 
@@ -94,7 +113,7 @@ Frontend:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
