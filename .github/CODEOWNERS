@@ -1,1 +1,5 @@
-* @lzy2767865503-pixel
+# Review requests are reserved for product code, not bot-only dependency updates.
+/backend/ @lzy2767865503-pixel
+/frontend/src/ @lzy2767865503-pixel
+/tests/ @lzy2767865503-pixel
+/scripts/ @lzy2767865503-pixel
