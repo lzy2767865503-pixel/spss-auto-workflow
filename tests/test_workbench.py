@@ -8,6 +8,7 @@ import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -25,7 +26,7 @@ from analysis_engine import (  # noqa: E402
     generate_spss_python_driver,
     inspect_dataset,
 )
-from app import app  # noqa: E402
+from app import app, job_locks, run_job  # noqa: E402
 
 
 class AnalysisEngineTests(unittest.TestCase):
@@ -117,6 +118,8 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertIn(".csv", payload["supportedFormats"])
         self.assertIn("installed", payload["spss"])
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
 
     def test_unsupported_upload_is_rejected(self) -> None:
         with app.test_client() as client:
@@ -127,6 +130,25 @@ class ApiTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 400)
         self.assertIn("error", response.get_json())
+
+    def test_background_job_lock_is_released_after_completion(self) -> None:
+        job_id = "00000000-0000-0000-0000-000000000001"
+        metadata = {"jobId": job_id, "status": "running"}
+        saved: list[dict] = []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("app.job_dir", return_value=Path(directory)), patch(
+                "app.load_job", side_effect=[metadata.copy(), metadata.copy()]
+            ):
+                with patch(
+                    "app.execute_workflow", return_value={"state": "complete"}
+                ), patch(
+                    "app.save_job",
+                    side_effect=lambda _job_id, value: saved.append(value),
+                ):
+                    run_job(job_id, {"executeSpss": False})
+
+        self.assertNotIn(job_id, job_locks)
+        self.assertEqual(saved[-1]["status"], "complete")
 
 
 if __name__ == "__main__":

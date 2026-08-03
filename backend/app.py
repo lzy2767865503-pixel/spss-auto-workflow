@@ -5,9 +5,10 @@ import mimetypes
 import os
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
@@ -29,7 +30,30 @@ JOBS_ROOT.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIST), static_url_path="")
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
-job_locks: dict[str, threading.Lock] = {}
+job_locks: dict[str, tuple[Any, int]] = {}
+job_locks_guard = threading.Lock()
+
+
+@contextmanager
+def hold_job_lock(job_id: str) -> Iterator[None]:
+    with job_locks_guard:
+        current = job_locks.get(job_id)
+        if current is None:
+            lock, users = threading.Lock(), 0
+        else:
+            lock, users = current
+        job_locks[job_id] = (lock, users + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with job_locks_guard:
+            current = job_locks.get(job_id)
+            if current and current[0] is lock:
+                if current[1] <= 1:
+                    job_locks.pop(job_id, None)
+                else:
+                    job_locks[job_id] = (lock, current[1] - 1)
 
 
 def job_dir(job_id: str) -> Path:
@@ -59,6 +83,15 @@ def public_job(metadata: dict[str, Any]) -> dict[str, Any]:
     copied = dict(metadata)
     copied.pop("storedPath", None)
     return copied
+
+
+@app.after_request
+def harden_response(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.errorhandler(413)
@@ -136,8 +169,7 @@ def change_sheet(job_id: str):
 
 
 def run_job(job_id: str, config: dict[str, Any]) -> None:
-    lock = job_locks.setdefault(job_id, threading.Lock())
-    with lock:
+    with hold_job_lock(job_id):
         metadata = load_job(job_id)
 
         def update(stage: str, progress: int, message: str) -> None:
