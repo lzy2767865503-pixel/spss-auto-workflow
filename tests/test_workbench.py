@@ -62,13 +62,17 @@ from spss_runner.windows import (  # noqa: E402
 
 class AnalysisEngineTests(unittest.TestCase):
     def test_required_bilingual_attribution_gate(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONIOENCODING"] = "cp1252"
         completed = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_attribution.py")],
             text=True,
             capture_output=True,
             check=False,
+            env=environment,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.isascii(), completed.stdout)
 
     def test_windows_qa_reuses_one_hash_verified_candidate(self) -> None:
         build_workflow = (ROOT / ".github" / "workflows" / "windows-store.yml").read_text(

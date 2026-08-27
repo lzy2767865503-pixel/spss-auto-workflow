@@ -106,7 +106,10 @@ def main() -> int:
             print(f"- {failure}", file=sys.stderr)
         return 1
 
-    print(f"Attribution gate passed: {ATTRIBUTION}")
+    # Keep the success line ASCII-only because Windows hosted runners can expose
+    # a legacy cp1252 stdout even though the repository files are UTF-8. The
+    # checks above still require the exact bilingual attribution in every file.
+    print("Attribution gate passed for LAI ZEYU and the required Chinese author form.")
     return 0
 
 
