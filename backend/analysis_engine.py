@@ -965,7 +965,7 @@ content = content.replace("{PORTABLE_COMMAND_PATH_TOKEN}", command_json_fragment
 if "{PORTABLE_STATUS_LITERAL_TOKEN}" in content or "{PORTABLE_COMMAND_PATH_TOKEN}" in content:
     raise SystemExit("Portable SPSS template replacement was incomplete.")
 destination.write_text(content, encoding="utf-8")
-print(f"Prepared: {{destination}}")
+print("Portable SPSS run file prepared.")
 print("Open this .sps file in IBM SPSS Statistics and choose Run > All.")
 """,
         encoding="utf-8",

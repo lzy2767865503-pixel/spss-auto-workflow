@@ -36,13 +36,43 @@ def build_cmd_invocation(
     launcher: str | Path,
     driver: str | Path,
 ) -> list[str]:
-    """Build one quoted ``cmd.exe`` command without invoking a shell in Python."""
+    """Build one quoted ``cmd.exe`` command without invoking a shell in Python.
+
+    The IBM launcher is already a batch file.  ``call`` is only needed when one
+    batch file invokes another and causes a second expansion pass for carets and
+    other metacharacters.  An extra outer quote pair is required with ``/s /c``:
+    cmd strips that pair and leaves both path arguments quoted.
+    """
 
     cmd = validate_cmd_path(command_processor, label="System cmd.exe path")
     batch = validate_cmd_path(launcher, label="IBM SPSS launcher path")
     script = validate_cmd_path(driver, label="Survey Data Workbench job path")
-    command = f'call "{batch}" "{script}"'
+    command = f'""{batch}" "{script}""'
     return [cmd, "/d", "/v:off", "/s", "/c", command]
+
+
+def decode_captured_output(value: bytes | str | None) -> str:
+    """Decode diagnostic output without trusting a Windows console code page.
+
+    IBM launchers and ``cmd.exe`` may emit different encodings in the same
+    process tree.  Formal success is determined from bounded output files, not
+    console text, so diagnostics are decoded best-effort and can never crash a
+    completed or failed run.
+    """
+
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    candidates = ["utf-8-sig"]
+    if os.name == "nt":
+        candidates.extend(("oem", "mbcs"))
+    for encoding in candidates:
+        try:
+            return value.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return value.decode("utf-8", errors="replace")
 
 
 def system_directory_path() -> Path:
@@ -213,17 +243,18 @@ class WindowsSpssRunner:
                 "message": f"IBM SPSS Windows runner 拒绝了不安全或不可用的启动路径：{error}",
             }
 
-        process: subprocess.Popen[str] | None = None
+        process: subprocess.Popen[bytes] | None = None
         try:
             process = subprocess.Popen(
                 invocation,
                 cwd=output_dir,
-                text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            stdout, stderr = process.communicate(timeout=timeout_seconds)
+            stdout_bytes, stderr_bytes = process.communicate(timeout=timeout_seconds)
+            stdout = decode_captured_output(stdout_bytes)
+            stderr = decode_captured_output(stderr_bytes)
             return_code = process.returncode
         except subprocess.TimeoutExpired:
             tree_termination_verified = False
@@ -238,7 +269,6 @@ class WindowsSpssRunner:
                     try:
                         terminated = subprocess.run(
                             [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
-                            text=True,
                             capture_output=True,
                             timeout=30,
                             check=False,
@@ -248,7 +278,7 @@ class WindowsSpssRunner:
                         if not tree_termination_verified:
                             termination_error = (
                                 f"taskkill exited {terminated.returncode}: "
-                                f"{(terminated.stderr or terminated.stdout)[-500:]}"
+                                f"{decode_captured_output(terminated.stderr or terminated.stdout)[-500:]}"
                             )
                     except (OSError, subprocess.TimeoutExpired) as error:
                         termination_error = str(error)

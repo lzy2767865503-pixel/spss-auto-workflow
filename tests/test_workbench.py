@@ -54,6 +54,7 @@ from spss_runner.base import EXPECTED_FORMAL_OUTPUTS, marker_result  # noqa: E40
 from spss_runner.windows import (  # noqa: E402
     WindowsSpssRunner,
     build_cmd_invocation,
+    decode_captured_output,
     detect_windows_spss,
     system_cmd_path,
     validate_cmd_path,
@@ -707,7 +708,13 @@ class AnalysisEngineTests(unittest.TestCase):
             relocated_resolved = relocated.resolve()
             shutil.copy2(template, relocated / template.name)
             shutil.copy2(helper, relocated / helper.name)
-            subprocess.run([sys.executable, str(relocated / helper.name)], check=True)
+            helper_environment = os.environ.copy()
+            helper_environment["PYTHONIOENCODING"] = "cp1252"
+            subprocess.run(
+                [sys.executable, str(relocated / helper.name)],
+                check=True,
+                env=helper_environment,
+            )
             portable = relocated / "run_with_spss_python_portable.sps"
             portable_text = portable.read_text(encoding="utf-8")
 
@@ -1043,6 +1050,11 @@ class AnalysisEngineTests(unittest.TestCase):
         value = r"C:\Users\来泽宇 O'Brien\Survey Data Workbench\driver.py"
         self.assertEqual(validate_cmd_path(value, label="test path"), value)
 
+    def test_windows_diagnostics_never_fail_on_mixed_console_bytes(self) -> None:
+        self.assertEqual(decode_captured_output("already decoded"), "already decoded")
+        self.assertEqual(decode_captured_output("来泽宇".encode("utf-8")), "来泽宇")
+        self.assertIsInstance(decode_captured_output(b"prefix\x81\x8d\xffsuffix"), str)
+
     def test_windows_command_paths_reject_shell_metacharacters(self) -> None:
         for character in '%!"\r\n':
             with self.subTest(character=character):
@@ -1054,7 +1066,7 @@ class AnalysisEngineTests(unittest.TestCase):
         driver = r"C:\Users\来泽宇 O'Brien\Survey ^ Data\run_with_spss_external.py"
         command = build_cmd_invocation(r"C:\Windows\System32\cmd.exe", launcher, driver)
         self.assertEqual(command[:5], [r"C:\Windows\System32\cmd.exe", "/d", "/v:off", "/s", "/c"])
-        self.assertEqual(command[5], f'call "{launcher}" "{driver}"')
+        self.assertEqual(command[5], f'""{launcher}" "{driver}""')
 
     @unittest.skipUnless(os.name == "nt", "requires the real Windows cmd.exe")
     def test_windows_cmd_invocation_round_trips_complex_quoted_paths(self) -> None:
@@ -1066,11 +1078,14 @@ class AnalysisEngineTests(unittest.TestCase):
             launcher.write_text('@echo off\r\n> "%~1" echo ok\r\n', encoding="utf-8")
             completed = subprocess.run(
                 build_cmd_invocation(system_cmd_path(), launcher, output),
-                text=True,
                 capture_output=True,
                 check=False,
             )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stderr.decode(errors="backslashreplace"),
+            )
             self.assertEqual(output.read_text(encoding="utf-8").strip(), "ok")
 
     def test_windows_command_processor_comes_from_system_directory_api(self) -> None:
@@ -1095,7 +1110,7 @@ class AnalysisEngineTests(unittest.TestCase):
             @staticmethod
             def communicate(timeout: int):
                 del timeout
-                return "", "expected marker-free test"
+                return b"", b"expected marker-free test"
 
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "来泽宇 O'Brien survey"
@@ -1121,9 +1136,12 @@ class AnalysisEngineTests(unittest.TestCase):
             self.assertEqual(command[:5], [r"C:\Windows\System32\cmd.exe", "/d", "/v:off", "/s", "/c"])
             self.assertEqual(
                 command[5],
-                'call "{}" "{}"'.format(installed["pythonLauncher"], driver),
+                '""{}" "{}""'.format(installed["pythonLauncher"], driver),
             )
             self.assertEqual(popen.call_args.kwargs["cwd"], output)
+            self.assertNotIn("text", popen.call_args.kwargs)
+            self.assertNotIn("encoding", popen.call_args.kwargs)
+            self.assertNotIn("errors", popen.call_args.kwargs)
             self.assertFalse((output / "run_spss_windows.cmd").exists())
             self.assertEqual(result["state"], "failed")
 
