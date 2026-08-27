@@ -121,6 +121,13 @@ public partial class MainWindow : Window
         try
         {
             await _uiReadyMessage.Task.WaitAsync(TimeSpan.FromSeconds(30), _shutdown.Token);
+            var eventName = $@"Local\LAISystems.StatFlowWorkbench.Ready.{Environment.ProcessId}";
+            _uiReady = new EventWaitHandle(false, EventResetMode.ManualReset, eventName, out var createdNew);
+            if (!createdNew)
+            {
+                throw new InvalidOperationException("UI readiness event already existed.");
+            }
+            _uiReady.Set();
             Browser.CoreWebView2.NavigationCompleted -= Browser_NavigationCompleted;
             Browser.CoreWebView2.WebMessageReceived -= Browser_WebMessageReceived;
         }
@@ -159,13 +166,6 @@ public partial class MainWindow : Window
             {
                 throw new InvalidOperationException("UI readiness message has an unexpected schema.");
             }
-            var eventName = $@"Local\LAISystems.StatFlowWorkbench.Ready.{Environment.ProcessId}";
-            _uiReady = new EventWaitHandle(false, EventResetMode.ManualReset, eventName, out var createdNew);
-            if (!createdNew)
-            {
-                throw new InvalidOperationException("UI readiness event already existed.");
-            }
-            _uiReady.Set();
             _uiReadyMessage.TrySetResult();
         }
         catch (Exception error)

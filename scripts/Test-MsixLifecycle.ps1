@@ -280,6 +280,19 @@ function Wait-ExternalDesktopReady($DesktopRecord, $BackendRecord, [string]$Labe
             [int]$listeners[0].LocalPort -ge 1024 -and [int]$listeners[0].LocalPort -le 65535) { return $true }
         return $false
     } -FailureMessage "$Label sidecar did not expose exactly one loopback listener." -TimeoutSeconds 120 | Out-Null
+    $readyEventName = "Local\LAISystems.StatFlowWorkbench.Ready.$([uint32]$DesktopRecord.Id)"
+    $readyEvent = Wait-Until -Condition {
+        Assert-OwnedProcessIdentity -Record $DesktopRecord | Out-Null
+        try { return [Threading.EventWaitHandle]::OpenExisting($readyEventName) }
+        catch [Threading.WaitHandleCannotBeOpenedException] { return $null }
+    } -FailureMessage "$Label did not publish its post-navigation UI readiness event." -TimeoutSeconds 120
+    try {
+        if (-not $readyEvent.WaitOne(0)) {
+            throw "$Label UI readiness event was not signaled."
+        }
+    } finally {
+        $readyEvent.Dispose()
+    }
 }
 
 function Get-DescendantProcesses {
@@ -561,6 +574,7 @@ try {
     }
     Wait-ExternalDesktopReady -DesktopRecord $firstDesktopRecord -BackendRecord $firstBackendRecord -Label "First installed launch"
     $evidence.firstExternalLaunchVerified = $true
+    $evidence.firstUiReadySignalVerified = $true
 
     Stop-OwnedProcess -Record $firstDesktopRecord -Label "The force-terminated WPF process"
     Wait-Until `
@@ -619,6 +633,7 @@ try {
     }
     Wait-ExternalDesktopReady -DesktopRecord $secondDesktopRecord -BackendRecord $secondBackendRecord -Label "Relaunched installed app"
     $evidence.secondExternalLaunchVerified = $true
+    $evidence.secondUiReadySignalVerified = $true
     $evidence.relaunchSucceeded = $true
     Set-Content -LiteralPath (Join-Path $localState "ci-uninstall-probe.txt") -Value "pass-$Pass" -Encoding UTF8
 

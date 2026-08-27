@@ -180,6 +180,9 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertIn("Add-AppxPackage", lifecycle)
         self.assertIn("PackageActivator", lifecycle)
         self.assertIn("msedgewebview2.exe", lifecycle)
+        self.assertIn("OpenExisting($readyEventName)", lifecycle)
+        self.assertIn("firstUiReadySignalVerified", lifecycle)
+        self.assertIn("secondUiReadySignalVerified", lifecycle)
         self.assertIn("LocalState remained after MSIX uninstall", lifecycle)
         self.assertIn('Arguments @("reset")', lifecycle)
         self.assertIn('"-appxpackagepath", $signedPackage, "-reportoutputpath", $wackReport', lifecycle)
@@ -262,6 +265,11 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertNotIn("ExecuteScriptAsync", main_window)
         self.assertIn("Browser_WebMessageReceived", main_window)
         self.assertIn("LAISystems.StatFlowWorkbench.Ready", main_window)
+        self.assertEqual(main_window.count("_uiReady.Set()"), 1)
+        self.assertLess(
+            main_window.index("await _uiReadyMessage.Task.WaitAsync"),
+            main_window.index("_uiReady.Set()"),
+        )
         self.assertIn('postMessage({ type: "statflow-ui-ready", version: 1 })', frontend_app)
 
         public_evidence = (ROOT / "scripts" / "New-PublicWindowsGateEvidence.ps1").read_text(
@@ -476,6 +484,8 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertIn("runtime pack exposes no license/notice source", generator)
         self.assertIn("publish_inventory_section", generator)
         self.assertIn('actual_sdk = subprocess.run(', generator)
+        self.assertIn('get("packagesPath", "")', generator)
+        self.assertIn("restore path differs from the exact configured package root", generator)
         self.assertIn("exposes no installed license/notice file", generator)
         self.assertIn("3.12.10", build_windows)
         global_json = json.loads((ROOT / "global.json").read_text(encoding="utf-8"))

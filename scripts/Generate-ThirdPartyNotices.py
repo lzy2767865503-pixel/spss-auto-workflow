@@ -462,11 +462,16 @@ def dotnet_sections(repo: Path, publish: Path) -> Iterable[str]:
         "NuGet restore asset graph",
     )
     assets_graph = json.loads(assets_file.read_text(encoding="utf-8"))
+    restored_packages_path = (
+        assets_graph.get("project", {}).get("restore", {}).get("packagesPath", "")
+    )
+    if not restored_packages_path or Path(restored_packages_path).resolve(strict=True) != nuget_root:
+        raise RuntimeError("NuGet asset graph restore path differs from the exact configured package root")
     package_folders = {
         Path(path).resolve(strict=True) for path in assets_graph.get("packageFolders", {})
     }
-    if package_folders != {nuget_root}:
-        raise RuntimeError("NuGet asset graph does not bind the exact configured package root")
+    if nuget_root not in package_folders:
+        raise RuntimeError("NuGet asset graph does not include the exact configured package root")
     webview_asset = assets_graph.get("libraries", {}).get(
         f"Microsoft.Web.WebView2/{EXPECTED_WEBVIEW2}", {}
     )
