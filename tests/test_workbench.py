@@ -89,8 +89,13 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertIn("stage-private-store-candidate:", build_workflow)
         self.assertNotIn("actions/upload-artifact", build_workflow)
         self.assertNotIn("actions/download-artifact", build_workflow)
-        self.assertEqual(build_workflow.count("Build-Windows.ps1"), 1)
-        self.assertEqual(build_workflow.count("Build-Msix.ps1"), 1)
+        hosted_block, private_block = build_workflow.split("\n  stage-private-store-candidate:", 1)
+        self.assertEqual(hosted_block.count("Build-Windows.ps1"), 1)
+        self.assertEqual(hosted_block.count("Build-Msix.ps1"), 1)
+        self.assertEqual(hosted_block.count("Test-HostedMsixSmoke.ps1"), 1)
+        self.assertEqual(hosted_block.count("Cleanup-MsixTestCandidate.ps1"), 1)
+        self.assertEqual(private_block.count("Build-Windows.ps1"), 1)
+        self.assertEqual(private_block.count("Build-Msix.ps1"), 1)
         self.assertEqual(build_workflow.count("Test-WindowsSidecar.ps1"), 2)
         self.assertGreaterEqual(build_workflow.count("Verify-ArtifactHashes.ps1"), 4)
         self.assertIn("group: trusted-windows-store-build", build_workflow)
@@ -218,6 +223,16 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertIn("LAIZEYU.SurveyDataWorkbenchbyLAIZEYU", build_workflow)
         self.assertIn("CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8", build_workflow)
         self.assertNotIn("-Development", build_workflow)
+        hosted_smoke = (ROOT / "scripts" / "Test-HostedMsixSmoke.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Add-AppxPackage", hosted_smoke)
+        self.assertIn("Test-WindowsSidecar.ps1", hosted_smoke)
+        self.assertIn("PackageActivator", hosted_smoke)
+        self.assertIn("installed desktop or backend bytes differ", hosted_smoke.lower())
+        self.assertIn("Verify-ArtifactHashes.ps1", hosted_smoke)
+        self.assertIn("Remove-AppxPackage -Package $packageFullName", hosted_smoke)
+        self.assertNotIn("actions/upload-artifact", hosted_smoke)
         cleanup = (ROOT / "scripts" / "Cleanup-MsixTestCandidate.ps1").read_text(
             encoding="utf-8"
         )
@@ -1056,25 +1071,29 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertIsInstance(decode_captured_output(b"prefix\x81\x8d\xffsuffix"), str)
 
     def test_windows_command_paths_reject_shell_metacharacters(self) -> None:
-        for character in '%!"\r\n':
+        for character in '%!&<>^|"\r\n':
             with self.subTest(character=character):
                 with self.assertRaisesRegex(ValueError, "cannot be used safely"):
                     validate_cmd_path(f"C:\\unsafe{character}path\\driver.py", label="test path")
 
-    def test_windows_cmd_invocation_quotes_parentheses_and_metacharacters(self) -> None:
+    def test_windows_cmd_invocation_quotes_parentheses_and_rejects_metacharacters(self) -> None:
         launcher = r"C:\Program Files (x86)\IBM & Research\statisticspython3.bat"
-        driver = r"C:\Users\来泽宇 O'Brien\Survey ^ Data\run_with_spss_external.py"
+        driver = r"C:\Users\来泽宇 O'Brien\Survey Data\run_with_spss_external.py"
+        with self.assertRaisesRegex(ValueError, "cannot be used safely"):
+            build_cmd_invocation(r"C:\Windows\System32\cmd.exe", launcher, driver)
+
+        launcher = r"C:\Program Files (x86)\IBM Research\statisticspython3.bat"
         command = build_cmd_invocation(r"C:\Windows\System32\cmd.exe", launcher, driver)
         self.assertEqual(command[:5], [r"C:\Windows\System32\cmd.exe", "/d", "/v:off", "/s", "/c"])
-        self.assertEqual(command[5], f'""{launcher}" "{driver}""')
+        self.assertEqual(command[5], f'call "{launcher}" "{driver}"')
 
     @unittest.skipUnless(os.name == "nt", "requires the real Windows cmd.exe")
     def test_windows_cmd_invocation_round_trips_complex_quoted_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "来泽宇 O'Brien (x86) & ^"
+            root = Path(directory) / "来泽宇 O'Brien (x86)"
             root.mkdir()
-            launcher = root / "launcher & test.bat"
-            output = root / "result ^ & (ok).txt"
+            launcher = root / "launcher test.bat"
+            output = root / "result (ok).txt"
             launcher.write_text('@echo off\r\n> "%~1" echo ok\r\n', encoding="utf-8")
             completed = subprocess.run(
                 build_cmd_invocation(system_cmd_path(), launcher, output),
@@ -1136,7 +1155,7 @@ class AnalysisEngineTests(unittest.TestCase):
             self.assertEqual(command[:5], [r"C:\Windows\System32\cmd.exe", "/d", "/v:off", "/s", "/c"])
             self.assertEqual(
                 command[5],
-                '""{}" "{}""'.format(installed["pythonLauncher"], driver),
+                'call "{}" "{}"'.format(installed["pythonLauncher"], driver),
             )
             self.assertEqual(popen.call_args.kwargs["cwd"], output)
             self.assertNotIn("text", popen.call_args.kwargs)

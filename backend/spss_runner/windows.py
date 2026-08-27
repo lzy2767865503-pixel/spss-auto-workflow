@@ -8,7 +8,7 @@ from typing import Any, Iterable
 from .base import marker_result
 
 
-CMD_UNSAFE_CHARACTERS = frozenset('%!\r\n"')
+CMD_UNSAFE_CHARACTERS = frozenset('%!&<>^|\r\n"')
 
 
 def validate_cmd_path(path: str | Path, *, label: str) -> str:
@@ -19,8 +19,11 @@ def validate_cmd_path(path: str | Path, *, label: str) -> str:
     and are passed through the native Unicode command line.  Characters that
     trigger percent/delayed expansion or terminate a quoted argument are
     rejected explicitly instead of being silently rewritten. Other command
-    metacharacters (including parentheses) are safe inside the quoted
-    arguments built by :func:`build_cmd_invocation`.
+    parentheses are safe inside the quoted arguments built by
+    :func:`build_cmd_invocation`.  Ampersands, carets, pipes, and redirection
+    characters are rejected because a vendor batch file can expand its
+    parameters through a second command-parser pass where quoting no longer
+    provides a general escape rule.
     """
 
     value = str(path)
@@ -38,16 +41,15 @@ def build_cmd_invocation(
 ) -> list[str]:
     """Build one quoted ``cmd.exe`` command without invoking a shell in Python.
 
-    The IBM launcher is already a batch file.  ``call`` is only needed when one
-    batch file invokes another and causes a second expansion pass for carets and
-    other metacharacters.  An extra outer quote pair is required with ``/s /c``:
-    cmd strips that pair and leaves both path arguments quoted.
+    The command parser boundary accepts only the path alphabet validated above.
+    ``call`` keeps the IBM batch launcher's exit status attached to this bounded
+    command processor without creating a repository-controlled wrapper file.
     """
 
     cmd = validate_cmd_path(command_processor, label="System cmd.exe path")
     batch = validate_cmd_path(launcher, label="IBM SPSS launcher path")
     script = validate_cmd_path(driver, label="Survey Data Workbench job path")
-    command = f'""{batch}" "{script}""'
+    command = f'call "{batch}" "{script}"'
     return [cmd, "/d", "/v:off", "/s", "/c", command]
 
 

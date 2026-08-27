@@ -103,9 +103,10 @@ all writers and transfers the frozen layout read-only to the sign-only domain.
 - SPSS launcher and job paths containing Chinese characters, spaces, and an
   apostrophe (for example `来泽宇 O'Brien`) still launch and preserve the exact
   completion-marker path.
-- Parentheses and quoted command metacharacters such as `^`, `&`, `|`, `<`, and
-  `>` remain supported inside safely quoted `/v:off` arguments. Paths with `%`,
-  `!`, a double quote, CR, or LF are rejected before `cmd.exe` starts.
+- Parentheses remain supported inside the quoted `/v:off` arguments. Paths with
+  `%`, `!`, `&`, `<`, `>`, `^`, `|`, a double quote, CR, or LF are rejected
+  before `cmd.exe` starts because a vendor batch file can reparse expanded
+  arguments and quoting alone cannot make those characters generally safe.
 - Magic-only, truncated, oversized, corrupt, or decompression-bomb SAV/SPV/PDF
   outputs fail. A correctly encoded empty Flate PDF stream remains valid.
 - App restart during a job: job becomes interrupted/failed, never complete.

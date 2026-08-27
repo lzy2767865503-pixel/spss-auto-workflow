@@ -5,7 +5,6 @@ import hashlib
 import hmac
 import importlib.util
 import json
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path

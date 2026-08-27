@@ -4,7 +4,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .base import EXPECTED_FORMAL_OUTPUTS, UnsupportedSpssRunner
+from .base import EXPECTED_FORMAL_OUTPUTS as EXPECTED_FORMAL_OUTPUTS
+from .base import UnsupportedSpssRunner
 from .macos import MacOSSpssRunner
 from .windows import WindowsSpssRunner
 
