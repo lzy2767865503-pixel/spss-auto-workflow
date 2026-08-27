@@ -1,4 +1,4 @@
-import { CheckCircle2, CircleDashed, FileArchive, FileText, LoaderCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CircleDashed, FileArchive, FileText, LoaderCircle } from "lucide-react";
 
 const LABELS = {
   descriptives: "描述统计",
@@ -10,9 +10,10 @@ const LABELS = {
 
 export default function SummaryPanel({ health, job, constructs, analyses, models, executeSpss }) {
   const complete = job?.status === "complete";
+  const formalFailed = job?.status === "formal_failed";
+  const filesReady = complete || formalFailed;
   const running = job?.status === "running";
   const files = job?.result?.files || [];
-  const predicted = 8 + Math.max(0, analyses.length - 3);
   const spssComplete = job?.result?.spss?.state === "complete";
 
   return (
@@ -38,20 +39,20 @@ export default function SummaryPanel({ health, job, constructs, analyses, models
       <section>
         <h3>执行状态</h3>
         <ul className="status-list">
-          <li className={health?.spss?.installed ? "good" : "muted"}>
-            {health?.spss?.installed ? <CheckCircle2 size={17} /> : <CircleDashed size={17} />}
-            {spssComplete ? "SPSS 已连接" : health?.spss?.installed ? "SPSS 已安装" : "未检测到 SPSS"}
+          <li className={spssComplete ? "good" : "muted"}>
+            {spssComplete ? <CheckCircle2 size={17} /> : <CircleDashed size={17} />}
+            {spssComplete ? "IBM SPSS 文件格式完整性已通过" : health?.spss?.installed ? "检测到 IBM SPSS（未验证）" : "未检测到 IBM SPSS"}
           </li>
-          <li className="amber"><FileArchive size={17} />{complete ? `已生成 ${files.length} 个文件` : `将生成约 ${predicted} 个文件`}</li>
-          <li className={running ? "running" : "good"}>
-            {running ? <LoaderCircle className="spin" size={17} /> : <CheckCircle2 size={17} />}
-            {executeSpss ? "Python 自动执行" : "仅生成语法"}
+          <li className="amber"><FileArchive size={17} />{filesReady ? `实际生成 ${files.length} 个文件` : "将生成 Python 预检、语法与下载包"}</li>
+          <li className={formalFailed ? "amber" : running ? "running" : "good"}>
+            {formalFailed ? <AlertTriangle size={17} /> : running ? <LoaderCircle className="spin" size={17} /> : <CheckCircle2 size={17} />}
+            {formalFailed ? "IBM SPSS 正式输出未验证；仅保留预检" : executeSpss ? "请求本机 IBM SPSS 正式执行" : "Python 预检模式（非正式 SPSS 输出）"}
           </li>
         </ul>
       </section>
       <section className="output-preview">
         <h3>输出文件</h3>
-        {complete ? (
+        {filesReady ? (
           files.slice(0, 7).map((file) => (
             <div className="output-line" key={file.name}>
               <FileText size={15} />
@@ -60,11 +61,12 @@ export default function SummaryPanel({ health, job, constructs, analyses, models
           ))
         ) : (
           <>
-            <div className="output-line"><FileText size={15} /><span>analysis_output.spv</span></div>
-            <div className="output-line"><FileText size={15} /><span>analysis_output.pdf</span></div>
-            <div className="output-line"><FileText size={15} /><span>analysis_data.sav</span></div>
+            <div className="output-caption">预检模式会生成</div>
+            <div className="output-line"><FileText size={15} /><span>analysis_summary.json</span></div>
             <div className="output-line"><FileText size={15} /><span>analysis_summary_cn.md</span></div>
-            <div className="output-line"><FileText size={15} /><span>完整产出.zip</span></div>
+            <div className="output-line"><FileText size={15} /><span>run_with_spss_python_portable.sps.in</span></div>
+            <div className="output-line"><FileArchive size={15} /><span>Survey_Data_Workbench_完整产出.zip</span></div>
+            {executeSpss ? <p className="formal-output-note">SAV、SPV、PDF 仅在 IBM SPSS 真实运行且三个文件通过完整解析后出现；发布前语义结果还须在两套获授权 IBM SPSS 环境复核。</p> : null}
           </>
         )}
       </section>

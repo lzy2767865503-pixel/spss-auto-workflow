@@ -1,14 +1,23 @@
-import { ChartNoAxesCombined, CheckCircle2, HelpCircle, Settings } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChartNoAxesCombined,
+  CheckCircle2,
+  CircleDashed,
+  HelpCircle,
+  Info,
+  LockKeyhole,
+  Settings,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import { changeSheet, getHealth, getJob, runAnalysis, uploadDataset } from "./api";
 import ConfigureStep from "./components/ConfigureStep";
+import InfoDialog from "./components/InfoDialog";
 import RunStep from "./components/RunStep";
 import StepRail from "./components/StepRail";
 import SummaryPanel from "./components/SummaryPanel";
 import UploadStep from "./components/UploadStep";
 
-const DEFAULT_ANALYSES = ["descriptives", "reliability", "correlations", "factor", "regression"];
+const DEFAULT_ANALYSES = ["descriptives", "reliability", "correlations"];
 
 function cloneConstructs(constructs = []) {
   return constructs.map((construct) => ({ ...construct, items: [...construct.items] }));
@@ -24,9 +33,10 @@ export default function App() {
   const [constructs, setConstructs] = useState([]);
   const [models, setModels] = useState([]);
   const [analyses, setAnalyses] = useState(DEFAULT_ANALYSES);
-  const [executeSpss, setExecuteSpss] = useState(true);
+  const [executeSpss, setExecuteSpss] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [dialogSection, setDialogSection] = useState("");
   const pollRef = useRef(null);
 
   useEffect(() => {
@@ -34,11 +44,11 @@ export default function App() {
     return () => window.clearTimeout(pollRef.current);
   }, []);
 
-  const activeStep = useMemo(() => {
-    if (!job) return 1;
-    if (job.status === "running" || job.status === "complete" || job.status === "failed") return 3;
-    return 2;
-  }, [job]);
+  const activeStep = !job
+    ? 1
+    : ["running", "complete", "formal_failed", "failed"].includes(job.status)
+      ? 3
+      : 2;
 
   useEffect(() => {
     if (activeStep === 3) window.scrollTo({ top: 0, behavior: "smooth" });
@@ -131,7 +141,7 @@ export default function App() {
     setConstructs([]);
     setModels([]);
     setAnalyses(DEFAULT_ANALYSES);
-    setExecuteSpss(true);
+    setExecuteSpss(false);
     setError("");
   }
 
@@ -140,19 +150,21 @@ export default function App() {
       <header className="top-bar">
         <div className="brand">
           <span className="brand-mark"><ChartNoAxesCombined size={23} /></span>
-          <strong>SPSS 自动分析台</strong>
+          <span className="brand-copy"><strong>Survey Data Workbench by LAI ZEYU</strong><small>本地问卷数据分析工作台</small></span>
         </div>
         <nav aria-label="应用状态与帮助">
-          <span className={health?.spss?.installed ? "connection good" : "connection muted"}>
-            <CheckCircle2 size={17} />
+          <span className={job?.result?.spss?.state === "complete" ? "connection good" : "connection muted"}>
+            {job?.result?.spss?.state === "complete" ? <CheckCircle2 size={17} /> : <CircleDashed size={17} />}
             {job?.result?.spss?.state === "complete"
-              ? "SPSS 已连接"
+              ? "IBM SPSS 文件格式完整"
               : health?.spss?.installed
-                ? "SPSS 已安装"
-                : "SPSS 未安装"}
+                ? "IBM SPSS 已检测（未验证）"
+                : "IBM SPSS 未检测"}
           </span>
-          <button className="top-icon" type="button" title="设置"><Settings size={19} /></button>
-          <button className="top-icon" type="button" title="帮助"><HelpCircle size={19} /></button>
+          <button className="top-icon" type="button" title="设置" aria-label="设置" onClick={() => setDialogSection("settings")}><Settings size={19} /></button>
+          <button className="top-icon" type="button" title="帮助" aria-label="帮助" onClick={() => setDialogSection("help")}><HelpCircle size={19} /></button>
+          <button className="top-link" type="button" aria-label="隐私" onClick={() => setDialogSection("privacy")}><LockKeyhole size={16} /><span>隐私</span></button>
+          <button className="top-link" type="button" aria-label="关于" onClick={() => setDialogSection("about")}><Info size={16} /><span>关于</span></button>
         </nav>
       </header>
 
@@ -172,6 +184,7 @@ export default function App() {
               setAnalyses={setAnalyses}
               executeSpss={executeSpss}
               setExecuteSpss={setExecuteSpss}
+              spss={health?.spss}
               onChangeSheet={handleSheet}
               onRun={handleRun}
               onReplace={reset}
@@ -190,6 +203,14 @@ export default function App() {
           executeSpss={executeSpss}
         />
       </div>
+      {dialogSection ? (
+        <InfoDialog
+          initialSection={dialogSection}
+          spss={health?.spss}
+          onClose={() => setDialogSection("")}
+          onDataDeleted={reset}
+        />
+      ) : null}
     </div>
   );
 }

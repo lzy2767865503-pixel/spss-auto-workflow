@@ -29,6 +29,7 @@ export default function ConfigureStep({
   setAnalyses,
   executeSpss,
   setExecuteSpss,
+  spss,
   onChangeSheet,
   onRun,
   onReplace,
@@ -188,6 +189,8 @@ export default function ConfigureStep({
             return (
               <button
                 type="button"
+                aria-label={analysis.label}
+                aria-pressed={selected}
                 className={selected ? "analysis-option selected" : "analysis-option"}
                 key={analysis.id}
                 onClick={() =>
@@ -249,6 +252,7 @@ export default function ConfigureStep({
                       return (
                         <button
                           type="button"
+                          aria-pressed={selected}
                           className={selected ? "predictor selected" : "predictor"}
                           key={construct.id}
                           onClick={() => togglePredictor(index, construct.id)}
@@ -277,15 +281,24 @@ export default function ConfigureStep({
 
       <div className="execution-row">
         <label className="switch-control">
-          <input type="checkbox" checked={executeSpss} onChange={(event) => setExecuteSpss(event.target.checked)} />
+          <input
+            type="checkbox"
+            checked={executeSpss}
+            disabled={!spss?.installed}
+            onChange={(event) => setExecuteSpss(event.target.checked)}
+          />
           <span className="switch-track"><span /></span>
           <span>
-            <strong>连接 IBM SPSS 自动执行</strong>
-            <small>关闭后只生成 SPSS Python 语法和 Python 预检结果</small>
+            <strong>使用本机 IBM SPSS Statistics 正式执行</strong>
+            <small>
+              {spss?.installed
+                ? "已检测到安装；许可证与集成只有在真实输出通过验证后才确认"
+                : "未检测到用户自行安装的 IBM SPSS；本次仅生成预检与语法"}
+            </small>
           </span>
         </label>
         <button className="primary-button run-button" type="button" onClick={onRun}>
-          开始自动分析
+          {executeSpss ? "运行预检与 IBM SPSS" : "生成预检与 SPSS 语法"}
         </button>
       </div>
       {error ? <div className="inline-error" role="alert">{error}</div> : null}

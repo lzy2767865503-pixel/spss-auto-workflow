@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lzy2767865503-pixel/spss-auto-workflow/blob/main/store/spss-validation-attestation.schema.json",
+  "title": "Survey Data Workbench reviewer-approved private IBM SPSS assertion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "assertionId",
+    "releaseTag",
+    "sourceCommit",
+    "applicationVersion",
+    "scope",
+    "testedCandidate",
+    "environmentId",
+    "windows",
+    "spss",
+    "fixture",
+    "integration",
+    "execution",
+    "comparisons",
+    "privateEvidenceSha256"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "assertionId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$" },
+    "releaseTag": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "applicationVersion": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "scope": { "const": "source-commit-and-integration-contract" },
+    "testedCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sha256"],
+      "properties": {
+        "kind": { "const": "private-windows-layout-manifest" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "environmentId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$" },
+    "windows": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edition", "version", "build", "architecture"],
+      "properties": {
+        "edition": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "build": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "architecture": { "const": "x64" }
+      }
+    },
+    "spss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "pythonIntegrationVersion", "licenseAuthorized"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "pythonIntegrationVersion": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "licenseAuthorized": { "const": true }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "const": "examples/synthetic_survey.csv" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "integration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contractVersion", "sourceSha256"],
+      "properties": {
+        "contractVersion": { "const": "statflow-spss-integration-v1" },
+        "sourceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "testedAtUtc",
+        "applicationRestartRepeated",
+        "formalRunState",
+        "formatIntegrityVerified",
+        "manualSyntaxComparisonPassed",
+        "semanticComparisonPassed"
+      ],
+      "properties": {
+        "testedAtUtc": { "type": "string", "format": "date-time" },
+        "applicationRestartRepeated": { "const": true },
+        "formalRunState": { "const": "complete" },
+        "formatIntegrityVerified": { "const": true },
+        "manualSyntaxComparisonPassed": { "const": true },
+        "semanticComparisonPassed": { "const": true }
+      }
+    },
+    "comparisons": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["descriptives", "reliability", "correlations", "factorability", "regression"],
+      "properties": {
+        "descriptives": { "$ref": "#/$defs/comparison" },
+        "reliability": { "$ref": "#/$defs/comparison" },
+        "correlations": { "$ref": "#/$defs/comparison" },
+        "factorability": { "$ref": "#/$defs/comparison" },
+        "regression": { "$ref": "#/$defs/comparison" }
+      }
+    },
+    "privateEvidenceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "$defs": {
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["comparedValues", "tolerance", "maxAbsDelta"],
+      "properties": {
+        "comparedValues": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "tolerance": { "type": "number", "exclusiveMinimum": 0, "maximum": 0.0001 },
+        "maxAbsDelta": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -1,0 +1,348 @@
+name: Windows Store Reviewed Interactive Gates
+
+# Activation requires transfer of repository ID 1311362169 to the approved
+# organization, four workflow-restricted ephemeral runner groups, four
+# protected environments, and a private UNC share with principal-specific ACLs.
+# The current personal repository does not satisfy that complete prerequisite
+# set, so every privileged job fails closed or remains skipped and no candidate
+# is uploaded.
+on:
+  workflow_run:
+    workflows:
+      - Windows Store Private Candidate
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: survey-data-workbench-reviewed-store-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  authorize-upstream:
+    name: Authorize exact current-main private handoff
+    if: >-
+      github.repository_id == '1311362169' &&
+      vars.TRUSTED_WINDOWS_REPOSITORY_OWNER != '' &&
+      github.repository_owner == vars.TRUSTED_WINDOWS_REPOSITORY_OWNER &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.event.workflow_run.name == 'Windows Store Private Candidate' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.status == 'completed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      source_commit: ${{ steps.authorize.outputs.source_commit }}
+      upstream_run_id: ${{ steps.authorize.outputs.upstream_run_id }}
+      upstream_run_attempt: ${{ steps.authorize.outputs.upstream_run_attempt }}
+      handoff_id: ${{ steps.authorize.outputs.handoff_id }}
+    steps:
+      - name: Re-resolve workflow, run, repository, and exact current main
+        id: authorize
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_REPOSITORY: ${{ github.repository }}
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          EVENT_OWNER: ${{ github.repository_owner }}
+          EVENT_WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          EVENT_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          EVENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EVENT_REPOSITORY_ID -cne '1311362169' -or
+              $env:EVENT_OWNER -cne '${{ vars.TRUSTED_WINDOWS_REPOSITORY_OWNER }}' -or
+              $env:EVENT_HEAD_SHA -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:EVENT_RUN_ID -cnotmatch '^\d+$' -or
+              $env:EVENT_RUN_ATTEMPT -cnotmatch '^\d+$') {
+            throw 'workflow_run authorization inputs are missing or malformed.'
+          }
+          $headers = @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'X-GitHub-Api-Version' = '2022-11-28'
+            'User-Agent' = 'survey-data-workbench-private-store-broker'
+          }
+          $apiBase = "https://api.github.com/repos/$($env:EVENT_REPOSITORY)"
+          $repository = Invoke-RestMethod -Method Get -Uri $apiBase -Headers $headers -TimeoutSec 120
+          if ([string]$repository.id -cne $env:EVENT_REPOSITORY_ID -or
+              [string]$repository.full_name -cne $env:EVENT_REPOSITORY -or
+              [string]$repository.owner.login -cne $env:EVENT_OWNER -or
+              [string]$repository.default_branch -cne 'main') {
+            throw 'Repository identity, owner, or default branch changed.'
+          }
+          $workflow = Invoke-RestMethod -Method Get -Uri "$apiBase/actions/workflows/windows-store.yml" -Headers $headers -TimeoutSec 120
+          if ([string]$workflow.id -cne $env:EVENT_WORKFLOW_ID -or
+              [string]$workflow.name -cne 'Windows Store Private Candidate' -or
+              [string]$workflow.path -cne '.github/workflows/windows-store.yml' -or
+              [string]$workflow.state -cne 'active') {
+            throw 'Triggering workflow identity does not match protected default branch.'
+          }
+          $run = Invoke-RestMethod -Method Get -Uri "$apiBase/actions/runs/$($env:EVENT_RUN_ID)" -Headers $headers -TimeoutSec 120
+          if ([string]$run.id -cne $env:EVENT_RUN_ID -or
+              [string]$run.workflow_id -cne $env:EVENT_WORKFLOW_ID -or
+              [string]$run.event -cne 'push' -or [string]$run.status -cne 'completed' -or
+              [string]$run.conclusion -cne 'success' -or [string]$run.head_branch -cne 'main' -or
+              [string]$run.head_sha -cne $env:EVENT_HEAD_SHA -or
+              [string]$run.repository.id -cne $env:EVENT_REPOSITORY_ID -or
+              [string]$run.head_repository.id -cne $env:EVENT_REPOSITORY_ID -or
+              [string]$run.run_attempt -cne $env:EVENT_RUN_ATTEMPT) {
+            throw 'Fresh workflow-run state differs from the trusted event.'
+          }
+          $main = Invoke-RestMethod -Method Get -Uri "$apiBase/git/ref/heads/main" -Headers $headers -TimeoutSec 120
+          $mainCommit = ([string]$main.object.sha).ToLowerInvariant()
+          if ([string]$main.ref -cne 'refs/heads/main' -or
+              [string]$main.object.type -cne 'commit' -or
+              $mainCommit -cne $env:EVENT_HEAD_SHA) {
+            throw 'The private Store candidate is not the exact current main commit.'
+          }
+          $comparison = Invoke-RestMethod -Method Get -Uri "$apiBase/compare/$($env:EVENT_HEAD_SHA)...main" -Headers $headers -TimeoutSec 120
+          if ([string]$comparison.status -cne 'identical' -or
+              [string]$comparison.base_commit.sha -cne $env:EVENT_HEAD_SHA -or
+              [string]$comparison.head_commit.sha -cne $env:EVENT_HEAD_SHA) {
+            throw 'GitHub compare did not return exact current-main identity.'
+          }
+          $handoffId = "store-$($env:EVENT_HEAD_SHA)-$($env:EVENT_RUN_ID)-$($env:EVENT_RUN_ATTEMPT)"
+          "source_commit=$($env:EVENT_HEAD_SHA)" >> $env:GITHUB_OUTPUT
+          "upstream_run_id=$($env:EVENT_RUN_ID)" >> $env:GITHUB_OUTPUT
+          "upstream_run_attempt=$($env:EVENT_RUN_ATTEMPT)" >> $env:GITHUB_OUTPUT
+          "handoff_id=$handoffId" >> $env:GITHUB_OUTPUT
+
+  windows-10-interactive:
+    name: Reviewed Windows 10 22H2 - identical private MSIX twice
+    needs: authorize-upstream
+    if: needs.authorize-upstream.result == 'success'
+    environment: trusted-windows-store-win10
+    runs-on:
+      group: trusted-windows-interactive-win10
+      labels: [self-hosted, Windows, X64, spss-wack-interactive, ephemeral, windows-10-22h2]
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact authorized current main without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize-upstream.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Re-prove exact current main on the interactive runner
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $head = (& git rev-parse HEAD).Trim().ToLowerInvariant()
+          & git fetch --force origin 'refs/heads/main:refs/remotes/origin/main'
+          $main = (& git rev-parse refs/remotes/origin/main).Trim().ToLowerInvariant()
+          if ($head -cne '${{ needs.authorize-upstream.outputs.source_commit }}' -or $head -cne $main) { throw 'Interactive runner is not on exact current main.' }
+      - name: Run reviewed Windows 10 private interactive gate
+        uses: ./.github/actions/run-windows-store-interactive
+        with:
+          repository: ${{ github.repository }}
+          repository-id: ${{ github.repository_id }}
+          source-commit: ${{ needs.authorize-upstream.outputs.source_commit }}
+          upstream-run-id: ${{ needs.authorize-upstream.outputs.upstream_run_id }}
+          upstream-run-attempt: ${{ needs.authorize-upstream.outputs.upstream_run_attempt }}
+          handoff-id: ${{ needs.authorize-upstream.outputs.handoff_id }}
+          private-handoff-root: ${{ secrets.STORE_PRIVATE_HANDOFF_ROOT }}
+          expected-runner-principal: ${{ secrets.STORE_HANDOFF_WIN10_PRINCIPAL }}
+          handoff-builder-principal: ${{ secrets.STORE_HANDOFF_BUILDER_PRINCIPAL }}
+          handoff-win10-principal: ${{ secrets.STORE_HANDOFF_WIN10_PRINCIPAL }}
+          handoff-win11-principal: ${{ secrets.STORE_HANDOFF_WIN11_PRINCIPAL }}
+          handoff-cleanup-principal: ${{ secrets.STORE_HANDOFF_CLEANUP_PRINCIPAL }}
+          handoff-owner-principal: ${{ secrets.STORE_HANDOFF_OWNER_PRINCIPAL }}
+          handoff-harness-path: ${{ vars.WINDOWS_HANDOFF_HARNESS_PATH }}
+          handoff-harness-sha256: ${{ vars.WINDOWS_HANDOFF_HARNESS_SHA256 }}
+          os-family: Windows 10
+          os-build: '19045'
+          os-evidence-slug: windows-10-22h2
+          expected-wack-tool-sha256: ${{ vars.WINDOWS_APPCERT_SHA256 }}
+          expected-wack-tool-file-version: ${{ vars.WINDOWS_APPCERT_FILE_VERSION }}
+          expected-wack-kit-version: ${{ vars.WINDOWS_WACK_KIT_VERSION }}
+      - name: Publish only fixed-schema Windows 10 evidence
+        uses: ./.github/actions/publish-windows-gate-evidence
+        with:
+          commit: ${{ needs.authorize-upstream.outputs.source_commit }}
+          artifact-name: survey-data-workbench-windows-gate-evidence-windows-10-22h2-${{ needs.authorize-upstream.outputs.source_commit }}
+      - name: Remove private Windows 10 raw evidence
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath ./test-results) {
+            $items = @(Get-Item -LiteralPath ./test-results -Force; Get-ChildItem -LiteralPath ./test-results -Recurse -Force)
+            if (@($items | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) { throw 'Private Windows 10 evidence contains a reparse point.' }
+            Remove-Item -LiteralPath ./test-results -Recurse -Force
+          }
+          if (Test-Path -LiteralPath ./test-results) { throw 'Private Windows 10 evidence remains.' }
+
+  windows-11-interactive:
+    name: Reviewed Windows 11 24H2 - identical private MSIX twice
+    needs: authorize-upstream
+    if: needs.authorize-upstream.result == 'success'
+    environment: trusted-windows-store-win11
+    runs-on:
+      group: trusted-windows-interactive-win11
+      labels: [self-hosted, Windows, X64, spss-wack-interactive, ephemeral, windows-11-24h2]
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact authorized current main without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize-upstream.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Re-prove exact current main on the interactive runner
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $head = (& git rev-parse HEAD).Trim().ToLowerInvariant()
+          & git fetch --force origin 'refs/heads/main:refs/remotes/origin/main'
+          $main = (& git rev-parse refs/remotes/origin/main).Trim().ToLowerInvariant()
+          if ($head -cne '${{ needs.authorize-upstream.outputs.source_commit }}' -or $head -cne $main) { throw 'Interactive runner is not on exact current main.' }
+      - name: Run reviewed Windows 11 private interactive gate
+        uses: ./.github/actions/run-windows-store-interactive
+        with:
+          repository: ${{ github.repository }}
+          repository-id: ${{ github.repository_id }}
+          source-commit: ${{ needs.authorize-upstream.outputs.source_commit }}
+          upstream-run-id: ${{ needs.authorize-upstream.outputs.upstream_run_id }}
+          upstream-run-attempt: ${{ needs.authorize-upstream.outputs.upstream_run_attempt }}
+          handoff-id: ${{ needs.authorize-upstream.outputs.handoff_id }}
+          private-handoff-root: ${{ secrets.STORE_PRIVATE_HANDOFF_ROOT }}
+          expected-runner-principal: ${{ secrets.STORE_HANDOFF_WIN11_PRINCIPAL }}
+          handoff-builder-principal: ${{ secrets.STORE_HANDOFF_BUILDER_PRINCIPAL }}
+          handoff-win10-principal: ${{ secrets.STORE_HANDOFF_WIN10_PRINCIPAL }}
+          handoff-win11-principal: ${{ secrets.STORE_HANDOFF_WIN11_PRINCIPAL }}
+          handoff-cleanup-principal: ${{ secrets.STORE_HANDOFF_CLEANUP_PRINCIPAL }}
+          handoff-owner-principal: ${{ secrets.STORE_HANDOFF_OWNER_PRINCIPAL }}
+          handoff-harness-path: ${{ vars.WINDOWS_HANDOFF_HARNESS_PATH }}
+          handoff-harness-sha256: ${{ vars.WINDOWS_HANDOFF_HARNESS_SHA256 }}
+          os-family: Windows 11
+          os-build: '26100'
+          os-evidence-slug: windows-11-24h2
+          expected-wack-tool-sha256: ${{ vars.WINDOWS_APPCERT_SHA256 }}
+          expected-wack-tool-file-version: ${{ vars.WINDOWS_APPCERT_FILE_VERSION }}
+          expected-wack-kit-version: ${{ vars.WINDOWS_WACK_KIT_VERSION }}
+      - name: Publish only fixed-schema Windows 11 evidence
+        uses: ./.github/actions/publish-windows-gate-evidence
+        with:
+          commit: ${{ needs.authorize-upstream.outputs.source_commit }}
+          artifact-name: survey-data-workbench-windows-gate-evidence-windows-11-24h2-${{ needs.authorize-upstream.outputs.source_commit }}
+      - name: Remove private Windows 11 raw evidence
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath ./test-results) {
+            $items = @(Get-Item -LiteralPath ./test-results -Force; Get-ChildItem -LiteralPath ./test-results -Recurse -Force)
+            if (@($items | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) { throw 'Private Windows 11 evidence contains a reparse point.' }
+            Remove-Item -LiteralPath ./test-results -Recurse -Force
+          }
+          if (Test-Path -LiteralPath ./test-results) { throw 'Private Windows 11 evidence remains.' }
+
+  cleanup-private-handoff:
+    name: Remove exact private Store handoff after both reviewed jobs
+    needs: [authorize-upstream, windows-10-interactive, windows-11-interactive]
+    if: >-
+      always() &&
+      github.repository_id == '1311362169' &&
+      vars.TRUSTED_WINDOWS_REPOSITORY_OWNER != '' &&
+      github.repository_owner == vars.TRUSTED_WINDOWS_REPOSITORY_OWNER &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.event.workflow_run.name == 'Windows Store Private Candidate' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.status == 'completed'
+    environment: trusted-windows-store-cleanup
+    runs-on:
+      group: trusted-windows-store-cleanup
+      labels: [self-hosted, Windows, X64, spss-store-cleanup, ephemeral]
+    timeout-minutes: 20
+    permissions: {}
+    env:
+      PRIVATE_HANDOFF_ROOT: ${{ secrets.STORE_PRIVATE_HANDOFF_ROOT }}
+      EXPECTED_CLEANUP_PRINCIPAL: ${{ secrets.STORE_HANDOFF_CLEANUP_PRINCIPAL }}
+      HANDOFF_OWNER_PRINCIPAL: ${{ secrets.STORE_HANDOFF_OWNER_PRINCIPAL }}
+      HANDOFF_HARNESS_PATH: ${{ vars.WINDOWS_HANDOFF_HARNESS_PATH }}
+      HANDOFF_HARNESS_SHA256: ${{ vars.WINDOWS_HANDOFF_HARNESS_SHA256 }}
+      EXPECTED_HANDOFF_ID: store-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+      EXPECTED_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      EXPECTED_UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+      EXPECTED_UPSTREAM_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+    steps:
+      - name: Delete only the exact ACL-owned private handoff
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_HANDOFF_ID -cnotmatch '^store-[0-9a-f]{40}-\d+-\d+$' -or
+              $env:EXPECTED_COMMIT -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:EXPECTED_UPSTREAM_RUN_ID -cnotmatch '^\d+$' -or
+              $env:EXPECTED_UPSTREAM_RUN_ATTEMPT -cnotmatch '^\d+$' -or
+              $env:EXPECTED_HANDOFF_ID -cne "store-$($env:EXPECTED_COMMIT)-$($env:EXPECTED_UPSTREAM_RUN_ID)-$($env:EXPECTED_UPSTREAM_RUN_ATTEMPT)" -or
+              [Security.Principal.WindowsIdentity]::GetCurrent().Name -cne $env:EXPECTED_CLEANUP_PRINCIPAL -or
+              [string]::IsNullOrWhiteSpace($env:HANDOFF_OWNER_PRINCIPAL) -or $env:HANDOFF_OWNER_PRINCIPAL -match '[\r\n]' -or
+              $env:HANDOFF_OWNER_PRINCIPAL -ieq $env:EXPECTED_CLEANUP_PRINCIPAL -or
+              $env:HANDOFF_HARNESS_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:PRIVATE_HANDOFF_ROOT -notmatch '^\\\\[^\\]+\\[^\\]+') { throw 'Private cleanup inputs are malformed.' }
+          $handoffHarness = (Resolve-Path -LiteralPath $env:HANDOFF_HARNESS_PATH).Path
+          $harnessItem = Get-Item -LiteralPath $handoffHarness -Force
+          $harnessSignature = Get-AuthenticodeSignature -LiteralPath $handoffHarness
+          $harnessSigner = if ($harnessSignature.SignerCertificate) { $harnessSignature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { '' }
+          if ($harnessItem.PSIsContainer -or ($harnessItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+              (Get-FileHash -LiteralPath $handoffHarness -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:HANDOFF_HARNESS_SHA256 -or
+              $harnessSignature.Status -ne 'Valid' -or -not $harnessSignature.TimeStamperCertificate -or $harnessSigner -notin @('LAI ZEYU','来泽宇')) {
+            throw 'Pinned Store handoff ACL harness is absent, linked, unsigned, or hash-mismatched.'
+          }
+          $root = [IO.Path]::GetFullPath($env:PRIVATE_HANDOFF_ROOT).TrimEnd('\')
+          $rootItem = Get-Item -LiteralPath $root -Force
+          if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Private cleanup root is absent or linked.'
+          }
+          $target = [IO.Path]::GetFullPath((Join-Path $root $env:EXPECTED_HANDOFF_ID))
+          if ([IO.Directory]::GetParent($target).FullName.TrimEnd('\') -cne $root) { throw 'Private cleanup target escaped its exact root.' }
+          if (-not (Test-Path -LiteralPath $target)) {
+            Write-Host 'No exact private Store handoff remains for this completed upstream run.'
+            return
+          }
+          $recordPath = Join-Path $target 'handoff.v2.json'
+          if (-not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { throw 'Exact private handoff record is missing; refusing broad cleanup.' }
+          $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+          $expectedProperties = @('candidateManifestSha256','handoffHarnessSha256','handoffId','handoffKind','identityName','publisher','publisherDisplayName','repository','repositoryId','repositoryOwner','schemaVersion','sourceCommit','storeProductId','workflowRunAttempt','workflowRunId') | Sort-Object
+          if ((Compare-Object $expectedProperties (@($record.PSObject.Properties.Name) | Sort-Object)) -or
+              [int]$record.schemaVersion -ne 2 -or [string]$record.handoffKind -cne 'private-acl-store-candidate' -or
+              [string]$record.handoffId -cne $env:EXPECTED_HANDOFF_ID -or [string]$record.repository -cne '${{ github.repository }}' -or
+              [string]$record.repositoryOwner -cne '${{ github.repository_owner }}' -or
+              [string]$record.sourceCommit -cne $env:EXPECTED_COMMIT -or [string]$record.repositoryId -cne '1311362169' -or
+              [string]$record.workflowRunId -cne $env:EXPECTED_UPSTREAM_RUN_ID -or
+              [int]$record.workflowRunAttempt -ne [int]$env:EXPECTED_UPSTREAM_RUN_ATTEMPT -or
+              [string]$record.candidateManifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+              [string]$record.handoffHarnessSha256 -cne $env:HANDOFF_HARNESS_SHA256 -or
+              [string]$record.storeProductId -cne '9NWXQZP2ZG2H' -or
+              [string]$record.identityName -cne 'LAIZEYU.SurveyDataWorkbenchbyLAIZEYU' -or
+              [string]$record.publisher -cne 'CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8' -or
+              [string]$record.publisherDisplayName -cne 'LAI ZEYU') {
+            throw 'Private handoff ownership record differs; refusing cleanup.'
+          }
+          $items = @(Get-Item -LiteralPath $target -Force; Get-ChildItem -LiteralPath $target -Recurse -Force)
+          if (@($items | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) { throw 'Private handoff contains a reparse point; refusing cleanup.' }
+          & $handoffHarness delete-handoff `
+            --path $target `
+            --cleanup $env:EXPECTED_CLEANUP_PRINCIPAL `
+            --allowed-owner $env:HANDOFF_OWNER_PRINCIPAL `
+            --forbid-broad `
+            --forbid-reparse
+          if ($LASTEXITCODE -ne 0) { throw 'Least-privilege Store cleanup harness rejected or failed exact deletion.' }
+          if (Test-Path -LiteralPath $target) { throw 'Private Store handoff remains after cleanup.' }

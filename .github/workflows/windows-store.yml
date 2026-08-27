@@ -1,0 +1,271 @@
+name: Windows Store Private Candidate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-source-gates:
+    name: Hosted source gates without binary upload
+    runs-on: windows-2025
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up exact Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: 3.12.10
+          cache: pip
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install exact source-gate dependencies
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install 'pip==26.2.1'
+          python -m pip install -r requirements-build.txt 'pip-audit==2.10.1'
+          python -m pip check
+          Push-Location frontend
+          try { npm ci } finally { Pop-Location }
+      - name: Source and dependency gate round 1
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python scripts/check_attribution.py
+          python -m pip_audit -r requirements.lock.txt
+          python -m pip_audit -r requirements-build.txt
+          python -m unittest discover -s tests -v
+          pwsh -NoProfile -File ./tests/windows_release_policy.tests.ps1
+          Push-Location frontend
+          try { npm audit; npm run build } finally { Pop-Location }
+      - name: Source and dependency gate round 2
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python scripts/check_attribution.py
+          python -m pip check
+          python -m pip_audit -r requirements.lock.txt
+          python -m pip_audit -r requirements-build.txt
+          python -m unittest discover -s tests -v
+          pwsh -NoProfile -File ./tests/windows_release_policy.tests.ps1
+          Push-Location frontend
+          try { npm audit; npm run build } finally { Pop-Location }
+      - name: State the hosted evidence boundary
+        if: always()
+        shell: pwsh
+        run: |
+          @(
+            '## Survey Data Workbench hosted source gate'
+            ''
+            "- Commit: ${{ github.sha }}"
+            "- Result: ${{ job.status }}"
+            '- This job uploads no artifact and never transfers an unsigned EXE, DLL, MSIX, archive, or candidate tree to GitHub.'
+            '- Only the separately approved organization runner-group job may create a private ACL-bound handoff for protected current main.'
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+
+  stage-private-store-candidate:
+    name: Build one private ACL-bound Store candidate
+    needs: hosted-source-gates
+    if: >-
+      needs.hosted-source-gates.result == 'success' &&
+      github.event_name == 'push' &&
+      github.repository_id == '1311362169' &&
+      vars.TRUSTED_WINDOWS_REPOSITORY_OWNER != '' &&
+      github.repository_owner == vars.TRUSTED_WINDOWS_REPOSITORY_OWNER &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true
+    environment: trusted-windows-store-build
+    runs-on:
+      group: trusted-windows-store-build
+      labels:
+        - self-hosted
+        - Windows
+        - X64
+        - spss-store-build
+        - ephemeral
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    env:
+      CANDIDATE_ROOT: artifacts/windows-x64
+      STORE_PRODUCT_ID: 9NWXQZP2ZG2H
+      STORE_IDENTITY_NAME: LAIZEYU.SurveyDataWorkbenchbyLAIZEYU
+      STORE_PUBLISHER: CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8
+      STORE_PUBLISHER_DISPLAY_NAME: LAI ZEYU
+      PRIVATE_HANDOFF_ROOT: ${{ secrets.STORE_PRIVATE_HANDOFF_ROOT }}
+      HANDOFF_BUILDER_PRINCIPAL: ${{ secrets.STORE_HANDOFF_BUILDER_PRINCIPAL }}
+      HANDOFF_WIN10_PRINCIPAL: ${{ secrets.STORE_HANDOFF_WIN10_PRINCIPAL }}
+      HANDOFF_WIN11_PRINCIPAL: ${{ secrets.STORE_HANDOFF_WIN11_PRINCIPAL }}
+      HANDOFF_CLEANUP_PRINCIPAL: ${{ secrets.STORE_HANDOFF_CLEANUP_PRINCIPAL }}
+      HANDOFF_OWNER_PRINCIPAL: ${{ secrets.STORE_HANDOFF_OWNER_PRINCIPAL }}
+      HANDOFF_HARNESS_PATH: ${{ vars.WINDOWS_HANDOFF_HARNESS_PATH }}
+      HANDOFF_HARNESS_SHA256: ${{ vars.WINDOWS_HANDOFF_HARNESS_SHA256 }}
+    steps:
+      - name: Check out exact protected current main without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Prove exact current protected main and private prerequisites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $head = (& git rev-parse HEAD).Trim().ToLowerInvariant()
+          & git fetch --force origin 'refs/heads/main:refs/remotes/origin/main'
+          $main = (& git rev-parse refs/remotes/origin/main).Trim().ToLowerInvariant()
+          if ($head -cne '${{ github.sha }}' -or $head -cne $main -or $head -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Store candidate must be built from the exact current protected main commit.'
+          }
+          if ($env:PRIVATE_HANDOFF_ROOT -notmatch '^\\\\[^\\]+\\[^\\]+' -or
+              -not (Test-Path -LiteralPath $env:PRIVATE_HANDOFF_ROOT -PathType Container)) {
+            throw 'STORE_PRIVATE_HANDOFF_ROOT must be a pre-provisioned private UNC directory.'
+          }
+          $rootItem = Get-Item -LiteralPath $env:PRIVATE_HANDOFF_ROOT -Force
+          if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Private handoff root is a reparse point.' }
+          $principalSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+          foreach ($principal in @($env:HANDOFF_BUILDER_PRINCIPAL, $env:HANDOFF_WIN10_PRINCIPAL, $env:HANDOFF_WIN11_PRINCIPAL, $env:HANDOFF_CLEANUP_PRINCIPAL, $env:HANDOFF_OWNER_PRINCIPAL)) {
+            if ([string]::IsNullOrWhiteSpace($principal) -or $principal -match '[\r\n]' -or -not $principalSet.Add($principal)) { throw 'Private handoff ACL principals are missing, malformed, or reused.' }
+          }
+          if ([Security.Principal.WindowsIdentity]::GetCurrent().Name -cne $env:HANDOFF_BUILDER_PRINCIPAL -or
+              $env:HANDOFF_HARNESS_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Store builder or pinned handoff harness digest differs.' }
+          $handoffHarness = (Resolve-Path -LiteralPath $env:HANDOFF_HARNESS_PATH).Path
+          $harnessItem = Get-Item -LiteralPath $handoffHarness -Force
+          $harnessSignature = Get-AuthenticodeSignature -LiteralPath $handoffHarness
+          $harnessSigner = if ($harnessSignature.SignerCertificate) { $harnessSignature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { '' }
+          if ($harnessItem.PSIsContainer -or ($harnessItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+              (Get-FileHash -LiteralPath $handoffHarness -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:HANDOFF_HARNESS_SHA256 -or
+              $harnessSignature.Status -ne 'Valid' -or -not $harnessSignature.TimeStamperCertificate -or $harnessSigner -notin @('LAI ZEYU','来泽宇')) {
+            throw 'Pinned Store handoff ACL harness is absent, linked, unsigned, or hash-mismatched.'
+          }
+          "TRUSTED_HANDOFF_HARNESS=$handoffHarness" >> $env:GITHUB_ENV
+      - name: Set up exact build runtimes
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: 3.12.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.424
+      - name: Build and freeze the only candidate
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          ./scripts/Build-Windows.ps1 -Configuration Release -Architecture x64 -SkipTests
+          ./scripts/Build-Msix.ps1 `
+            -LayoutDirectory ./artifacts/windows-x64/layout `
+            -IdentityName $env:STORE_IDENTITY_NAME `
+            -Publisher $env:STORE_PUBLISHER `
+            -PublisherDisplayName $env:STORE_PUBLISHER_DISPLAY_NAME
+          Remove-Item -LiteralPath ./artifacts/windows-x64/pyinstaller -Recurse -Force
+          Remove-Item -LiteralPath ./artifacts/windows-x64/pyinstaller-work -Recurse -Force
+          ./scripts/Write-ArtifactHashes.ps1 -ArtifactRoot ./$env:CANDIDATE_ROOT
+          ./scripts/Verify-ArtifactHashes.ps1 -ArtifactRoot ./$env:CANDIDATE_ROOT
+          $digest = (Get-FileHash ./$env:CANDIDATE_ROOT/SHA256SUMS.txt -Algorithm SHA256).Hash.ToLowerInvariant()
+          "FROZEN_CANDIDATE_DIGEST=$digest" >> $env:GITHUB_ENV
+      - name: Candidate sidecar QA round 1
+        shell: pwsh
+        run: |
+          ./scripts/Verify-ArtifactHashes.ps1 -ArtifactRoot ./$env:CANDIDATE_ROOT
+          ./scripts/Test-WindowsSidecar.ps1 -LayoutDirectory ./$env:CANDIDATE_ROOT/layout -DiagnosticsDirectory ./test-results/private-pass-1
+          if ((Get-FileHash ./$env:CANDIDATE_ROOT/SHA256SUMS.txt -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:FROZEN_CANDIDATE_DIGEST) { throw 'Round 1 changed the frozen candidate.' }
+      - name: Candidate sidecar QA round 2 on identical bytes
+        shell: pwsh
+        run: |
+          ./scripts/Verify-ArtifactHashes.ps1 -ArtifactRoot ./$env:CANDIDATE_ROOT
+          ./scripts/Test-WindowsSidecar.ps1 -LayoutDirectory ./$env:CANDIDATE_ROOT/layout -DiagnosticsDirectory ./test-results/private-pass-2
+          if ((Get-FileHash ./$env:CANDIDATE_ROOT/SHA256SUMS.txt -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:FROZEN_CANDIDATE_DIGEST) { throw 'Round 2 did not use identical candidate bytes.' }
+      - name: Atomically stage the private ACL-bound handoff
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $handoffId = "store-$($env:GITHUB_SHA)-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+          if ($handoffId -cnotmatch '^store-[0-9a-f]{40}-\d+-\d+$') { throw 'Private handoff ID is malformed.' }
+          $root = [IO.Path]::GetFullPath($env:PRIVATE_HANDOFF_ROOT).TrimEnd('\')
+          $final = Join-Path $root $handoffId
+          $staging = Join-Path $root (".staging-" + $handoffId + '-' + [Guid]::NewGuid().ToString('N'))
+          if (Test-Path -LiteralPath $final) { throw 'Refusing to replace an existing private Store handoff.' }
+          try {
+            New-Item -ItemType Directory -Path (Join-Path $staging 'candidate') | Out-Null
+            Copy-Item -Path (Join-Path (Resolve-Path ./$env:CANDIDATE_ROOT).Path '*') -Destination (Join-Path $staging 'candidate') -Recurse -Force
+            ./scripts/Verify-ArtifactHashes.ps1 -ArtifactRoot (Join-Path $staging 'candidate')
+            if ((Get-FileHash (Join-Path $staging 'candidate\SHA256SUMS.txt') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:FROZEN_CANDIDATE_DIGEST) {
+              throw 'Private handoff differs from the frozen candidate.'
+            }
+            $record = [ordered]@{
+              schemaVersion = 2
+              handoffKind = 'private-acl-store-candidate'
+              handoffId = $handoffId
+              repository = '${{ github.repository }}'
+              repositoryId = [long]'${{ github.repository_id }}'
+              repositoryOwner = '${{ github.repository_owner }}'
+              sourceCommit = '${{ github.sha }}'
+              workflowRunId = '${{ github.run_id }}'
+              workflowRunAttempt = [int]'${{ github.run_attempt }}'
+              candidateManifestSha256 = $env:FROZEN_CANDIDATE_DIGEST
+              storeProductId = $env:STORE_PRODUCT_ID
+              identityName = $env:STORE_IDENTITY_NAME
+              publisher = $env:STORE_PUBLISHER
+              publisherDisplayName = $env:STORE_PUBLISHER_DISPLAY_NAME
+              handoffHarnessSha256 = $env:HANDOFF_HARNESS_SHA256
+            }
+            [IO.File]::WriteAllText((Join-Path $staging 'handoff.v2.json'), (($record | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
+            $items = @(Get-Item -LiteralPath $staging -Force; Get-ChildItem -LiteralPath $staging -Recurse -Force)
+            if (@($items | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) { throw 'Private handoff contains a reparse point.' }
+            & $env:TRUSTED_HANDOFF_HARNESS publish-handoff `
+              --staging-path $staging `
+              --final-path $final `
+              --owner $env:HANDOFF_OWNER_PRINCIPAL `
+              --reader $env:HANDOFF_BUILDER_PRINCIPAL `
+              --reader $env:HANDOFF_WIN10_PRINCIPAL `
+              --reader $env:HANDOFF_WIN11_PRINCIPAL `
+              --cleanup $env:HANDOFF_CLEANUP_PRINCIPAL `
+              --forbid-writer `
+              --forbid-broad `
+              --forbid-reparse
+            if ($LASTEXITCODE -ne 0) { throw 'Could not atomically publish the immutable Store handoff.' }
+            & $env:TRUSTED_HANDOFF_HARNESS assert-handoff `
+              --path $final `
+              --owner $env:HANDOFF_OWNER_PRINCIPAL `
+              --reader $env:HANDOFF_BUILDER_PRINCIPAL `
+              --reader $env:HANDOFF_WIN10_PRINCIPAL `
+              --reader $env:HANDOFF_WIN11_PRINCIPAL `
+              --cleanup $env:HANDOFF_CLEANUP_PRINCIPAL `
+              --forbid-writer `
+              --forbid-broad `
+              --forbid-reparse
+            if ($LASTEXITCODE -ne 0) { throw 'Store handoff retained a writer or changed after atomic publication.' }
+            if (-not (Test-Path -LiteralPath (Join-Path $final 'handoff.v2.json') -PathType Leaf)) { throw 'Atomic private handoff publication failed.' }
+            ./scripts/Verify-ArtifactHashes.ps1 -ArtifactRoot (Join-Path $final 'candidate')
+            if ((Get-FileHash (Join-Path $final 'candidate\SHA256SUMS.txt') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:FROZEN_CANDIDATE_DIGEST) { throw 'Immutable Store handoff changed during ACL/owner transfer.' }
+          } finally {
+            if (Test-Path -LiteralPath $staging) {
+              if ([IO.Directory]::GetParent([IO.Path]::GetFullPath($staging)).FullName.TrimEnd('\') -cne $root -or
+                  (Split-Path -Leaf $staging) -cnotmatch "^\.staging-$([Regex]::Escape($handoffId))-[0-9a-f]{32}$") { throw 'Private Store staging cleanup escaped its exact root.' }
+              $stagingItems = @(Get-Item -LiteralPath $staging -Force; Get-ChildItem -LiteralPath $staging -Recurse -Force)
+              if (@($stagingItems | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) { throw 'Private Store staging residue contains a reparse point.' }
+              & icacls.exe $staging /inheritance:r /grant:r "$($env:HANDOFF_BUILDER_PRINCIPAL):(OI)(CI)(F)" /t /c | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'Could not establish Store staging cleanup ACL.' }
+              Remove-Item -LiteralPath $staging -Recurse -Force
+              if (Test-Path -LiteralPath $staging) { throw 'Private Store staging residue remains.' }
+            }
+          }
+          Write-Host "Private handoff staged without any GitHub artifact: $handoffId"

@@ -1,0 +1,44 @@
+name: Canonicalise and upload trusted Windows gate evidence
+description: Create the fixed-schema public summary and upload its exact allowlist in one trusted-event step.
+
+inputs:
+  commit:
+    description: Exact lowercase 40-character commit ID.
+    required: true
+  artifact-name:
+    description: Fixed public artifact name for this commit.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Canonicalise fixed-schema evidence and freeze the exact allowlist
+      shell: pwsh
+      env:
+        EVIDENCE_COMMIT: ${{ inputs.commit }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        ./scripts/New-PublicWindowsGateEvidence.ps1 `
+          -TestResultsDirectory ./test-results `
+          -OutputDirectory ./public-windows-gate-evidence `
+          -Commit $env:EVIDENCE_COMMIT
+        $files = @(Get-ChildItem -LiteralPath ./public-windows-gate-evidence -File)
+        if ($files.Count -ne 2 -or
+            @($files.Name | Sort-Object) -join ',' -cne 'SHA256SUMS.txt,windows-gate-summary.v3.json') {
+          throw 'Canonical public evidence allowlist changed.'
+        }
+        # No caller or untrusted action runs between canonicalisation and the
+        # fixed-path uploader in this one composite step. Remove write access
+        # from the runner identity as a final background-process TOCTOU guard.
+        & icacls.exe ./public-windows-gate-evidence /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)(RX)" /t /c
+        if ($LASTEXITCODE -ne 0) { throw 'Could not make canonical evidence read-only before upload.' }
+
+    - name: Upload only the frozen two-file allowlist
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          public-windows-gate-evidence/windows-gate-summary.v3.json
+          public-windows-gate-evidence/SHA256SUMS.txt
+        if-no-files-found: error
+        retention-days: 14

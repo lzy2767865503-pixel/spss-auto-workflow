@@ -1,0 +1,14 @@
+self-hosted-runner:
+  labels:
+    - spss-wack-interactive
+    - ephemeral
+    - windows-10-22h2
+    - windows-11-24h2
+    - spss-store-build
+    - spss-store-cleanup
+    - spss-release-build
+    - spss-release-review
+    - spss-release-signing
+    - spss-release-verifier
+    - spss-release-publisher
+    - spss-release-cleanup
