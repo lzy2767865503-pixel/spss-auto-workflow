@@ -239,6 +239,7 @@ runs:
         ./scripts/Prepare-MsixTestCandidate.ps1 `
           -CandidateRoot $env:INTERACTIVE_CANDIDATE_ROOT `
           -StateDirectory $env:TEST_SIGNING_STATE `
+          -ExpectedCandidateManifestSha256 $env:EXPECTED_CANDIDATE_MANIFEST `
           -Publisher 'CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8'
         $state = Get-Content -LiteralPath (Join-Path $env:TEST_SIGNING_STATE 'state.json') -Raw | ConvertFrom-Json
         if ([string]$state.signedPackageSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'QA signed package hash is malformed.' }

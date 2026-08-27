@@ -40,7 +40,12 @@ export default function App() {
   const pollRef = useRef(null);
 
   useEffect(() => {
-    getHealth().then(setHealth).catch((requestError) => setError(requestError.message));
+    getHealth()
+      .then((result) => {
+        setHealth(result);
+        window.chrome?.webview?.postMessage({ type: "statflow-ui-ready", version: 1 });
+      })
+      .catch((requestError) => setError(requestError.message));
     return () => window.clearTimeout(pollRef.current);
   }, []);
 

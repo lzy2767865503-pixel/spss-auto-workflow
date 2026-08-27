@@ -18,7 +18,10 @@ LICENSE_FILE = re.compile(r"^(licen[cs]e|copying|notice|copyright)(\..*)?$", re.
 EXPECTED_PYTHON = (3, 12, 10)
 EXPECTED_DOTNET_SDK = "8.0.424"
 EXPECTED_DOTNET_RUNTIME = "8.0.30"
+EXPECTED_DOTNET_TARGET = "net8.0-windows10.0.19041"
+EXPECTED_DOTNET_RID = "win-x64"
 EXPECTED_WEBVIEW2 = "1.0.4129.50"
+EXPECTED_WEBVIEW2_LOCK_RANGE = f"[{EXPECTED_WEBVIEW2}, {EXPECTED_WEBVIEW2}]"
 
 
 def normalized(text: str) -> str:
@@ -47,6 +50,42 @@ def require_regular_file(path: Path, label: str) -> Path:
     if not resolved.is_file() or resolved.stat().st_size <= 0:
         raise RuntimeError(f"{label} is not one non-empty regular file: {resolved}")
     return resolved
+
+
+def locked_webview_entry(lock: object) -> dict[str, object]:
+    if not isinstance(lock, dict):
+        raise RuntimeError("NuGet lock must be a JSON object")
+    targets = lock.get("dependencies")
+    expected_targets = {
+        EXPECTED_DOTNET_TARGET,
+        f"{EXPECTED_DOTNET_TARGET}/{EXPECTED_DOTNET_RID}",
+    }
+    if not isinstance(targets, dict) or set(targets) != expected_targets:
+        raise RuntimeError(
+            "NuGet lock must contain only the exact framework and win-x64 runtime targets"
+        )
+
+    entries: list[dict[str, object]] = []
+    for target_name in sorted(expected_targets):
+        target = targets[target_name]
+        if not isinstance(target, dict):
+            raise RuntimeError(f"NuGet lock target {target_name} must be an object")
+        webview_lock = target.get("Microsoft.Web.WebView2")
+        if not isinstance(webview_lock, dict) or (
+            webview_lock.get("type") != "Direct"
+            or webview_lock.get("requested") != EXPECTED_WEBVIEW2_LOCK_RANGE
+            or webview_lock.get("resolved") != EXPECTED_WEBVIEW2
+            or not re.fullmatch(
+                r"[A-Za-z0-9+/]{40,}={0,2}", str(webview_lock.get("contentHash", ""))
+            )
+        ):
+            raise RuntimeError(
+                f"NuGet lock target {target_name} does not bind exact WebView2 version/content hash"
+            )
+        entries.append(webview_lock)
+    if entries[0] != entries[1]:
+        raise RuntimeError("NuGet framework and runtime targets bind different WebView2 packages")
+    return entries[0]
 
 
 def canonical_name(value: str) -> str:
@@ -284,9 +323,17 @@ def frontend_sections(repo: Path) -> Iterable[str]:
 def dotnet_sections(repo: Path, publish: Path) -> Iterable[str]:
     project_file = repo / "desktop" / "StatFlow.Workbench.Desktop" / "StatFlow.Workbench.Desktop.csproj"
     project = ET.parse(project_file)
-    runtime_versions = {str(node.text or "").strip() for node in project.findall(".//RuntimeFrameworkVersion")}
-    if runtime_versions != {EXPECTED_DOTNET_RUNTIME}:
-        raise RuntimeError("Desktop project does not pin exact .NET runtime 8.0.30")
+    runtime_versions = project.findall(".//RuntimeFrameworkVersion")
+    if runtime_versions:
+        raise RuntimeError(
+            "Desktop project must not override every framework reference with RuntimeFrameworkVersion"
+        )
+    latest_runtime_patch = {
+        str(node.text or "").strip().lower()
+        for node in project.findall(".//TargetLatestRuntimePatch")
+    }
+    if latest_runtime_patch != {"true"}:
+        raise RuntimeError("Desktop project must select the latest patch from the exact pinned SDK")
     webview_versions = {
         str(item.get("Version") or "").strip().strip("[]")
         for item in project.findall(".//PackageReference")
@@ -311,17 +358,7 @@ def dotnet_sections(repo: Path, publish: Path) -> Iterable[str]:
     if actual_sdk != EXPECTED_DOTNET_SDK:
         raise RuntimeError(f"Actual dotnet SDK is {actual_sdk!r}, expected exact {EXPECTED_DOTNET_SDK}")
     lock = json.loads((project_file.parent / "packages.lock.json").read_text(encoding="utf-8"))
-    targets = lock.get("dependencies", {})
-    if len(targets) != 1:
-        raise RuntimeError("NuGet lock must contain one exact target framework")
-    webview_lock = next(iter(targets.values())).get("Microsoft.Web.WebView2", {})
-    if (
-        webview_lock.get("type") != "Direct"
-        or webview_lock.get("requested") != f"[{EXPECTED_WEBVIEW2}]"
-        or webview_lock.get("resolved") != EXPECTED_WEBVIEW2
-        or not re.fullmatch(r"[A-Za-z0-9+/]{40,}={0,2}", str(webview_lock.get("contentHash", "")))
-    ):
-        raise RuntimeError("NuGet lock does not bind exact WebView2 version/content hash")
+    webview_lock = locked_webview_entry(lock)
 
     deps_files = list(publish.glob("StatFlow.Workbench.Desktop.deps.json"))
     runtime_files = list(publish.glob("StatFlow.Workbench.Desktop.runtimeconfig.json"))
@@ -330,8 +367,8 @@ def dotnet_sections(repo: Path, publish: Path) -> Iterable[str]:
     deps = json.loads(deps_files[0].read_text(encoding="utf-8"))
     libraries = set(deps.get("libraries", {}))
     required_libraries = {
-        f"Microsoft.NETCore.App.Runtime.win-x64/{EXPECTED_DOTNET_RUNTIME}",
-        f"Microsoft.WindowsDesktop.App.Runtime.win-x64/{EXPECTED_DOTNET_RUNTIME}",
+        f"runtimepack.Microsoft.NETCore.App.Runtime.win-x64/{EXPECTED_DOTNET_RUNTIME}",
+        f"runtimepack.Microsoft.WindowsDesktop.App.Runtime.win-x64/{EXPECTED_DOTNET_RUNTIME}",
         f"Microsoft.Web.WebView2/{EXPECTED_WEBVIEW2}",
     }
     if not required_libraries.issubset(libraries):
@@ -370,7 +407,9 @@ def dotnet_sections(repo: Path, publish: Path) -> Iterable[str]:
         if len(matches) != 1:
             raise RuntimeError(f"Expected one final {name}; found {len(matches)}")
         runtime_assets.extend(matches)
-    nuget_root = Path(os.environ.get("NUGET_PACKAGES", Path.home() / ".nuget" / "packages"))
+    nuget_root = Path(
+        os.environ.get("NUGET_PACKAGES", Path.home() / ".nuget" / "packages")
+    ).resolve(strict=True)
     runtime_notice_sources: list[Path] = []
     for package_name in (
         "microsoft.netcore.app.runtime.win-x64",
@@ -413,10 +452,30 @@ def dotnet_sections(repo: Path, publish: Path) -> Iterable[str]:
         raise RuntimeError(f"Exact WebView2 NuGet package is missing: {webview_root}")
     webview_nupkg_hash = require_regular_file(
         webview_root / f"microsoft.web.webview2.{EXPECTED_WEBVIEW2}.nupkg.sha512",
-        "WebView2 NuGet package content hash",
+        "WebView2 raw NuGet package hash",
     )
-    if read_text(webview_nupkg_hash) != str(webview_lock["contentHash"]):
-        raise RuntimeError("Restored WebView2 NuGet package hash differs from packages.lock.json")
+    raw_webview_hash = read_text(webview_nupkg_hash)
+    if not re.fullmatch(r"[A-Za-z0-9+/]{40,}={0,2}", raw_webview_hash):
+        raise RuntimeError("Restored WebView2 raw NuGet package hash is malformed")
+    assets_file = require_regular_file(
+        project_file.parent / "obj" / "project.assets.json",
+        "NuGet restore asset graph",
+    )
+    assets_graph = json.loads(assets_file.read_text(encoding="utf-8"))
+    package_folders = {
+        Path(path).resolve(strict=True) for path in assets_graph.get("packageFolders", {})
+    }
+    if package_folders != {nuget_root}:
+        raise RuntimeError("NuGet asset graph does not bind the exact configured package root")
+    webview_asset = assets_graph.get("libraries", {}).get(
+        f"Microsoft.Web.WebView2/{EXPECTED_WEBVIEW2}", {}
+    )
+    if (
+        webview_asset.get("type") != "package"
+        or webview_asset.get("sha512") != webview_lock["contentHash"]
+        or webview_asset.get("path") != f"microsoft.web.webview2/{EXPECTED_WEBVIEW2}"
+    ):
+        raise RuntimeError("NuGet asset graph differs from the locked WebView2 package")
     webview_license_files = sorted(
         require_regular_file(path, "WebView2 license/notice source")
         for path in webview_root.rglob("*")
@@ -434,6 +493,7 @@ def dotnet_sections(repo: Path, publish: Path) -> Iterable[str]:
         f"## Microsoft Edge WebView2 SDK {EXPECTED_WEBVIEW2}",
         "",
         "The SDK/loader assemblies are redistributed; Evergreen Runtime remains an external dependency.",
+        f"Raw restored package SHA-512: `{raw_webview_hash}`",
     ]
     for asset in sorted(set(webview_assets)):
         lines.append(f"Final asset `{asset.relative_to(publish).as_posix()}` SHA-256: `{sha256(asset)}`")

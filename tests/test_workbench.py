@@ -94,6 +94,8 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertEqual(hosted_block.count("Build-Msix.ps1"), 1)
         self.assertEqual(hosted_block.count("Test-HostedMsixSmoke.ps1"), 1)
         self.assertEqual(hosted_block.count("Cleanup-MsixTestCandidate.ps1"), 1)
+        self.assertIn("verification_pass: [1, 2]", hosted_block)
+        self.assertIn("ExpectedCandidateManifestSha256", hosted_block)
         self.assertEqual(private_block.count("Build-Windows.ps1"), 1)
         self.assertEqual(private_block.count("Build-Msix.ps1"), 1)
         self.assertEqual(build_workflow.count("Test-WindowsSidecar.ps1"), 2)
@@ -111,6 +113,12 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertEqual(build_workflow.count("--forbid-writer"), 2)
         self.assertIn("STORE_HANDOFF_OWNER_PRINCIPAL", build_workflow)
         self.assertIn("STORE_HANDOFF_CLEANUP_PRINCIPAL", build_workflow)
+        self.assertIn("exact protected builder-only ACL", private_block)
+        self.assertIn("Remove private runner-local build and test material", private_block)
+        self.assertLess(
+            private_block.index("exact protected builder-only ACL"),
+            private_block.index("Copy-Item -Path"),
+        )
         immutable_store_handoff = build_workflow.split("publish-handoff", 1)[1].split(
             "} finally", 1
         )[0]
@@ -220,6 +228,8 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertNotIn("Export-PfxCertificate", prepare)
         self.assertIn("Private QA signing material was not removed", prepare)
         self.assertIn("unsigned QA candidate contains a reparse point", prepare)
+        self.assertIn("candidateManifestSha256", prepare)
+        self.assertIn("sourcePackagePath", prepare)
         self.assertIn("LAIZEYU.SurveyDataWorkbenchbyLAIZEYU", build_workflow)
         self.assertIn("CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8", build_workflow)
         self.assertNotIn("-Development", build_workflow)
@@ -229,7 +239,11 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertIn("Add-AppxPackage", hosted_smoke)
         self.assertIn("Test-WindowsSidecar.ps1", hosted_smoke)
         self.assertIn("PackageActivator", hosted_smoke)
-        self.assertIn("installed desktop or backend bytes differ", hosted_smoke.lower())
+        self.assertIn("Get-RegularTreeManifest", hosted_smoke)
+        self.assertIn("installed payload file differs", hosted_smoke.lower())
+        self.assertIn("OpenExisting($uiReadyEventName)", hosted_smoke)
+        self.assertIn("installedPayloadVerified", hosted_smoke)
+        self.assertIn("desktopUiReadyVerified", hosted_smoke)
         self.assertIn("Verify-ArtifactHashes.ps1", hosted_smoke)
         self.assertIn("Remove-AppxPackage -Package $packageFullName", hosted_smoke)
         self.assertNotIn("actions/upload-artifact", hosted_smoke)
@@ -243,8 +257,12 @@ class AnalysisEngineTests(unittest.TestCase):
         main_window = (
             ROOT / "desktop" / "StatFlow.Workbench.Desktop" / "MainWindow.xaml.cs"
         ).read_text(encoding="utf-8")
+        frontend_app = (ROOT / "frontend" / "src" / "App.jsx").read_text(encoding="utf-8")
         self.assertNotIn("ci-evidence", main_window.lower())
         self.assertNotIn("ExecuteScriptAsync", main_window)
+        self.assertIn("Browser_WebMessageReceived", main_window)
+        self.assertIn("LAISystems.StatFlowWorkbench.Ready", main_window)
+        self.assertIn('postMessage({ type: "statflow-ui-ready", version: 1 })', frontend_app)
 
         public_evidence = (ROOT / "scripts" / "New-PublicWindowsGateEvidence.ps1").read_text(
             encoding="utf-8"
@@ -432,6 +450,8 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertNotIn("STATFLOW_CERT_PASSWORD", build_msix)
         self.assertNotIn('"--locked-mode"', build_windows)
         self.assertIn("<RestoreLockedMode>true</RestoreLockedMode>", desktop_project)
+        self.assertNotIn("<RuntimeFrameworkVersion>", desktop_project)
+        self.assertIn("<TargetLatestRuntimePatch>true</TargetLatestRuntimePatch>", desktop_project)
         lifecycle = (ROOT / "scripts" / "Test-MsixLifecycle.ps1").read_text(
             encoding="utf-8"
         )
@@ -634,6 +654,43 @@ class AnalysisEngineTests(unittest.TestCase):
             with patch.object(notices.metadata, "distributions", return_value=installed):
                 with self.assertRaisesRegex(RuntimeError, "absent from the exact lock files"):
                     list(notices.python_sections(repo))
+
+    def test_notice_generation_requires_framework_and_win_x64_nuget_targets(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "generate_third_party_notices_nuget_lock",
+            ROOT / "scripts" / "Generate-ThirdPartyNotices.py",
+        )
+        assert spec and spec.loader
+        notices = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(notices)
+        webview = {
+            "type": "Direct",
+            "requested": "[1.0.4129.50, 1.0.4129.50]",
+            "resolved": "1.0.4129.50",
+            "contentHash": "A" * 86 + "==",
+        }
+        framework = notices.EXPECTED_DOTNET_TARGET
+        runtime = f"{framework}/{notices.EXPECTED_DOTNET_RID}"
+        lock = {
+            "dependencies": {
+                framework: {"Microsoft.Web.WebView2": webview.copy()},
+                runtime: {"Microsoft.Web.WebView2": webview.copy()},
+            }
+        }
+        self.assertEqual(notices.locked_webview_entry(lock), webview)
+
+        missing_runtime = {
+            "dependencies": {framework: {"Microsoft.Web.WebView2": webview.copy()}}
+        }
+        with self.assertRaisesRegex(RuntimeError, "framework and win-x64 runtime targets"):
+            notices.locked_webview_entry(missing_runtime)
+
+        mismatched = json.loads(json.dumps(lock))
+        mismatched["dependencies"][runtime]["Microsoft.Web.WebView2"][
+            "contentHash"
+        ] = "B" * 86 + "=="
+        with self.assertRaisesRegex(RuntimeError, "different WebView2 packages"):
+            notices.locked_webview_entry(mismatched)
 
     def test_spss_reader_without_safe_metadata_fails_before_row_allocation(self) -> None:
         calls: list[dict[str, object]] = []

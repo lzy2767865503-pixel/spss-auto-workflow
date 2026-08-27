@@ -73,6 +73,10 @@ $sourcePackageHash = (Get-FileHash -LiteralPath $packages[0].FullName -Algorithm
 if ($sourcePackageHash -cne ([string]$signingState.sourcePackageSha256).ToLowerInvariant()) {
     throw "The unsigned source MSIX no longer matches the package that was signed once for both passes."
 }
+$candidateManifestHash = (Get-FileHash -LiteralPath (Join-Path $candidate "SHA256SUMS.txt") -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($candidateManifestHash -cne ([string]$signingState.candidateManifestSha256).ToLowerInvariant()) {
+    throw "The candidate manifest no longer matches the manifest frozen before QA signing."
+}
 $signature = Get-AuthenticodeSignature -FilePath $signedPackage
 if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -cne $Publisher) {
     throw "The frozen one-time signed QA MSIX is not currently valid for the fixed Partner Center publisher."

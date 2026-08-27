@@ -9,9 +9,13 @@ permissions:
 
 jobs:
   hosted-source-gates:
-    name: Hosted source gates without binary upload
+    name: Hosted source gates without binary upload - independent pass ${{ matrix.verification_pass }}
     runs-on: windows-2025
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        verification_pass: [1, 2]
     permissions:
       contents: read
     steps:
@@ -70,7 +74,7 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          $stateDirectory = Join-Path $env:RUNNER_TEMP "statflow-msix-test-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $stateDirectory = Join-Path $env:RUNNER_TEMP "statflow-msix-test-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-${{ matrix.verification_pass }}"
           "HOSTED_MSIX_STATE=$stateDirectory" >> $env:GITHUB_ENV
           ./scripts/Build-Windows.ps1 -Configuration Release -Architecture x64 -SkipTests
           ./scripts/Build-Msix.ps1 `
@@ -82,16 +86,18 @@ jobs:
           Remove-Item -LiteralPath ./artifacts/windows-x64/pyinstaller-work -Recurse -Force
           ./scripts/Write-ArtifactHashes.ps1 -ArtifactRoot ./artifacts/windows-x64
           ./scripts/Verify-ArtifactHashes.ps1 -ArtifactRoot ./artifacts/windows-x64
+          $manifest = (Get-FileHash ./artifacts/windows-x64/SHA256SUMS.txt -Algorithm SHA256).Hash.ToLowerInvariant()
           ./scripts/Prepare-MsixTestCandidate.ps1 `
             -CandidateRoot ./artifacts/windows-x64 `
-            -StateDirectory $stateDirectory
+            -StateDirectory $stateDirectory `
+            -ExpectedCandidateManifestSha256 $manifest
           ./scripts/Test-HostedMsixSmoke.ps1 `
             -CandidateRoot ./artifacts/windows-x64 `
             -SigningStatePath (Join-Path $stateDirectory 'state.json') `
+            -ExpectedCandidateManifestSha256 $manifest `
             -RunKind '${{ github.event_name }}' `
-            -DiagnosticsDirectory "./test-results/hosted-${{ github.event_name }}"
-          $manifest = (Get-FileHash ./artifacts/windows-x64/SHA256SUMS.txt -Algorithm SHA256).Hash.ToLowerInvariant()
-          "Hosted candidate manifest SHA-256: $manifest" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+            -DiagnosticsDirectory "./test-results/hosted-${{ github.event_name }}-pass-${{ matrix.verification_pass }}"
+          "Hosted independent pass ${{ matrix.verification_pass }} candidate manifest SHA-256: $manifest" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
           'The candidate, temporary QA signature, certificate, and raw diagnostics remain runner-local and are never uploaded.' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
       - name: Remove temporary hosted package trust and runner-local candidate
         if: always()
@@ -123,6 +129,7 @@ jobs:
             '## Survey Data Workbench hosted source gate'
             ''
             "- Commit: ${{ github.sha }}"
+            "- Independent pass: ${{ matrix.verification_pass }}"
             "- Result: ${{ job.status }}"
             '- This job uploads no artifact and never transfers an unsigned EXE, DLL, MSIX, archive, or candidate tree to GitHub.'
             '- Only the separately approved organization runner-group job may create a private ACL-bound handoff for protected current main.'
@@ -257,6 +264,20 @@ jobs:
           $staging = Join-Path $root (".staging-" + $handoffId + '-' + [Guid]::NewGuid().ToString('N'))
           if (Test-Path -LiteralPath $final) { throw 'Refusing to replace an existing private Store handoff.' }
           try {
+            New-Item -ItemType Directory -Path $staging | Out-Null
+            & icacls.exe $staging /inheritance:r /grant:r "$($env:HANDOFF_BUILDER_PRINCIPAL):(OI)(CI)(F)" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Could not lock empty Store staging before writing candidate bytes.' }
+            $stagingAcl = Get-Acl -LiteralPath $staging
+            $stagingRules = @($stagingAcl.Access)
+            $requiredInheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+            if (-not $stagingAcl.AreAccessRulesProtected -or $stagingRules.Count -ne 1 -or
+                [string]$stagingRules[0].IdentityReference.Value -cne $env:HANDOFF_BUILDER_PRINCIPAL -or
+                $stagingRules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+                $stagingRules[0].FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+                $stagingRules[0].InheritanceFlags -ne $requiredInheritance -or
+                $stagingRules[0].PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+              throw 'Empty Store staging ACL is not the exact protected builder-only ACL.'
+            }
             New-Item -ItemType Directory -Path (Join-Path $staging 'candidate') | Out-Null
             Copy-Item -Path (Join-Path (Resolve-Path ./$env:CANDIDATE_ROOT).Path '*') -Destination (Join-Path $staging 'candidate') -Recurse -Force
             ./scripts/Verify-ArtifactHashes.ps1 -ArtifactRoot (Join-Path $staging 'candidate')
@@ -322,3 +343,34 @@ jobs:
             }
           }
           Write-Host "Private handoff staged without any GitHub artifact: $handoffId"
+      - name: Remove private runner-local build and test material
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\')
+          $relativeTargets = @(
+            'artifacts/windows-x64',
+            'test-results',
+            '.venv-windows',
+            'frontend/node_modules',
+            'frontend/dist',
+            'desktop/StatFlow.Workbench.Desktop/bin',
+            'desktop/StatFlow.Workbench.Desktop/obj',
+            'backend/__pycache__',
+            'scripts/__pycache__'
+          )
+          foreach ($relative in $relativeTargets) {
+            $target = [IO.Path]::GetFullPath((Join-Path $workspace $relative))
+            $expected = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE $relative))
+            if ($target -cne $expected -or -not $target.StartsWith("$workspace\", [StringComparison]::Ordinal)) {
+              throw "Private runner cleanup target escaped the exact workspace: $relative"
+            }
+            if (-not (Test-Path -LiteralPath $target)) { continue }
+            $items = @(Get-Item -LiteralPath $target -Force; Get-ChildItem -LiteralPath $target -Recurse -Force)
+            if (@($items | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) {
+              throw "Private runner cleanup target contains a reparse point: $relative"
+            }
+            Remove-Item -LiteralPath $target -Recurse -Force
+            if (Test-Path -LiteralPath $target) { throw "Private runner cleanup target remains: $relative" }
+          }

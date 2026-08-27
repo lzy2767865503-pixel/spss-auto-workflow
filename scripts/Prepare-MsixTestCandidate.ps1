@@ -3,6 +3,8 @@ param(
     [string]$CandidateRoot,
     [Parameter(Mandatory = $true)]
     [string]$StateDirectory,
+    [Parameter(Mandatory = $true)]
+    [string]$ExpectedCandidateManifestSha256,
     [string]$Publisher = "CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8"
 )
 
@@ -17,6 +19,12 @@ if ($Publisher -cne "CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8") {
 }
 
 $candidate = (Resolve-Path -LiteralPath $CandidateRoot).Path
+$candidateManifest = Join-Path $candidate "SHA256SUMS.txt"
+$actualCandidateManifestSha256 = (Get-FileHash -LiteralPath $candidateManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($ExpectedCandidateManifestSha256 -cnotmatch "^[0-9a-f]{64}$" -or
+    $actualCandidateManifestSha256 -cne $ExpectedCandidateManifestSha256) {
+    throw "The QA signing request does not bind the frozen candidate manifest."
+}
 $candidateItems = @(Get-Item -LiteralPath $candidate -Force; Get-ChildItem -LiteralPath $candidate -Recurse -Force)
 if (@($candidateItems | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) {
     throw "The unsigned QA candidate contains a reparse point."
@@ -92,11 +100,17 @@ try {
     }
     $personalThumbprint = $null
 
+    if ((Get-FileHash -LiteralPath $candidateManifest -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedCandidateManifestSha256) {
+        throw "The candidate manifest changed while the QA package was signed."
+    }
+
     $state = [ordered]@{
         schemaVersion = 1
         publisher = $Publisher
+        candidateManifestSha256 = $ExpectedCandidateManifestSha256
         signedPackagePath = $signedPackage
         signedPackageSha256 = (Get-FileHash -LiteralPath $signedPackage -Algorithm SHA256).Hash.ToLowerInvariant()
+        sourcePackagePath = $packages[0].FullName
         sourcePackageSha256 = (Get-FileHash -LiteralPath $packages[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         trustedThumbprints = @($trustedThumbprints)
         createdAtUtc = [DateTime]::UtcNow.ToString("o")

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
 using System.Windows;
 using Microsoft.Web.WebView2.Core;
 
@@ -10,7 +11,9 @@ public partial class MainWindow : Window
 {
     private readonly BackendHost _backend = new();
     private readonly CancellationTokenSource _shutdown = new();
+    private readonly TaskCompletionSource _uiReadyMessage = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Uri? _localOrigin;
+    private EventWaitHandle? _uiReady;
     private bool _closed;
 
     public MainWindow()
@@ -92,6 +95,8 @@ public partial class MainWindow : Window
                 args.Cancel = true;
             }
         };
+        core.NavigationCompleted += Browser_NavigationCompleted;
+        core.WebMessageReceived += Browser_WebMessageReceived;
         core.NewWindowRequested += (_, args) =>
         {
             args.Handled = true;
@@ -101,6 +106,72 @@ public partial class MainWindow : Window
             }
         };
         core.ProcessFailed += (_, _) => Dispatcher.Invoke(() => ShowStartupError("界面进程异常退出，请重新启动应用。"));
+    }
+
+    private async void Browser_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs args)
+    {
+        if (!args.IsSuccess)
+        {
+            Browser.CoreWebView2.NavigationCompleted -= Browser_NavigationCompleted;
+            Browser.CoreWebView2.WebMessageReceived -= Browser_WebMessageReceived;
+            ShowStartupError($"界面导航失败：{args.WebErrorStatus}");
+            return;
+        }
+
+        try
+        {
+            await _uiReadyMessage.Task.WaitAsync(TimeSpan.FromSeconds(30), _shutdown.Token);
+            Browser.CoreWebView2.NavigationCompleted -= Browser_NavigationCompleted;
+            Browser.CoreWebView2.WebMessageReceived -= Browser_WebMessageReceived;
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+        {
+            // Normal shutdown during UI readiness verification.
+        }
+        catch (Exception error)
+        {
+            Browser.CoreWebView2.NavigationCompleted -= Browser_NavigationCompleted;
+            Browser.CoreWebView2.WebMessageReceived -= Browser_WebMessageReceived;
+            ShowStartupError($"界面未完成初始化：{error.Message}");
+        }
+    }
+
+    private void Browser_WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs args)
+    {
+        if (_uiReadyMessage.Task.IsCompleted)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_localOrigin is null || !Uri.TryCreate(args.Source, UriKind.Absolute, out var source) ||
+                !string.Equals(source.GetLeftPart(UriPartial.Authority), _localOrigin.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("UI readiness message came from an unexpected origin.");
+            }
+            using var document = JsonDocument.Parse(args.WebMessageAsJson);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Count() != 2 ||
+                !root.TryGetProperty("type", out var type) || type.GetString() != "statflow-ui-ready" ||
+                !root.TryGetProperty("version", out var version) || version.ValueKind != JsonValueKind.Number ||
+                version.GetInt32() != 1)
+            {
+                throw new InvalidOperationException("UI readiness message has an unexpected schema.");
+            }
+            var eventName = $@"Local\LAISystems.StatFlowWorkbench.Ready.{Environment.ProcessId}";
+            _uiReady = new EventWaitHandle(false, EventResetMode.ManualReset, eventName, out var createdNew);
+            if (!createdNew)
+            {
+                throw new InvalidOperationException("UI readiness event already existed.");
+            }
+            _uiReady.Set();
+            _uiReadyMessage.TrySetResult();
+        }
+        catch (Exception error)
+        {
+            _uiReadyMessage.TrySetException(error);
+        }
     }
 
     private void ShowStartupError(string message)
@@ -125,6 +196,8 @@ public partial class MainWindow : Window
         e.Cancel = true;
         _closed = true;
         _shutdown.Cancel();
+        _uiReady?.Dispose();
+        _uiReady = null;
         Browser.Dispose();
         await _backend.DisposeAsync();
         _shutdown.Dispose();

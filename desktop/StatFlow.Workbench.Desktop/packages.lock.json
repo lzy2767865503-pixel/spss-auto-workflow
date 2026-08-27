@@ -4,9 +4,17 @@
     "net8.0-windows10.0.19041": {
       "Microsoft.Web.WebView2": {
         "type": "Direct",
-        "requested": "[1.0.4129.50]",
+        "requested": "[1.0.4129.50, 1.0.4129.50]",
         "resolved": "1.0.4129.50",
-        "contentHash": "9TM9AZpDUiAb6OJB9s6thxl63BJFgbINcp047Zy+oiz9+cjgLhFrMRZ5Be+5wVHGvMJR3z1rmPWeJipo4g0sJw=="
+        "contentHash": "BuJC70c7SCl8wlvojLZbc/E5ONmGyG3fhAMmpftCpKerxae//TxgKOTELRK2QRD7m7jigNFQRf6cfVT3ZiIQoQ=="
+      }
+    },
+    "net8.0-windows10.0.19041/win-x64": {
+      "Microsoft.Web.WebView2": {
+        "type": "Direct",
+        "requested": "[1.0.4129.50, 1.0.4129.50]",
+        "resolved": "1.0.4129.50",
+        "contentHash": "BuJC70c7SCl8wlvojLZbc/E5ONmGyG3fhAMmpftCpKerxae//TxgKOTELRK2QRD7m7jigNFQRf6cfVT3ZiIQoQ=="
       }
     }
   }
