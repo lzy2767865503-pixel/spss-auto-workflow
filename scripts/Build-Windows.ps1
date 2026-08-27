@@ -85,7 +85,6 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
 $project = Join-Path $repo "desktop\StatFlow.Workbench.Desktop\StatFlow.Workbench.Desktop.csproj"
 $publishArgs = @(
     "publish", $project,
-    "--locked-mode",
     "--configuration", $Configuration,
     "--runtime", "win-$Architecture",
     "--self-contained", "true",

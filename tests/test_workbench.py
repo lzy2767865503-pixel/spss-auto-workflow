@@ -409,6 +409,9 @@ class AnalysisEngineTests(unittest.TestCase):
         manifest = (ROOT / "packaging" / "AppxManifest.template.xml").read_text(encoding="utf-8")
         build_msix = (ROOT / "scripts" / "Build-Msix.ps1").read_text(encoding="utf-8")
         build_windows = (ROOT / "scripts" / "Build-Windows.ps1").read_text(encoding="utf-8")
+        desktop_project = (
+            ROOT / "desktop" / "StatFlow.Workbench.Desktop" / "StatFlow.Workbench.Desktop.csproj"
+        ).read_text(encoding="utf-8")
         info_dialog = (ROOT / "frontend" / "src" / "components" / "InfoDialog.jsx").read_text(
             encoding="utf-8"
         )
@@ -427,6 +430,8 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertIn("Invoke-SslEsignerSign.ps1", build_msix)
         self.assertNotIn("PfxPath", build_msix)
         self.assertNotIn("STATFLOW_CERT_PASSWORD", build_msix)
+        self.assertNotIn('"--locked-mode"', build_windows)
+        self.assertIn("<RestoreLockedMode>true</RestoreLockedMode>", desktop_project)
         lifecycle = (ROOT / "scripts" / "Test-MsixLifecycle.ps1").read_text(
             encoding="utf-8"
         )
