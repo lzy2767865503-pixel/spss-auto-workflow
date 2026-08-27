@@ -451,6 +451,15 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertIn('$Version -cne $ExpectedStoreVersion', build_msix)
         self.assertNotIn("Get-Command makeappx.exe", build_msix)
         self.assertIn("Get-TrustedWindowsSdkTool", build_msix)
+        trusted_sdk_tools = (ROOT / "scripts" / "Trusted-WindowsSdkTool.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            trusted_sdk_tools.count(
+                "$current -is [IO.FileInfo]) { $current.Directory } else { $current.Parent }"
+            ),
+            2,
+        )
         self.assertIn('$PublisherDisplayName -cne "LAI ZEYU"', build_msix)
         self.assertIn("$SigningStatePath", build_msix)
         self.assertIn("Invoke-SslEsignerSign.ps1", build_msix)

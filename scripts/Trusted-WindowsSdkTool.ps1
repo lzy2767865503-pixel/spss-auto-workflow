@@ -23,7 +23,7 @@ function Get-TrustedWindowsSdkTool {
             $reachedRoot = $true
             break
         }
-        $current = $current.Parent
+        $current = if ($current -is [IO.FileInfo]) { $current.Directory } else { $current.Parent }
     }
     if (-not $reachedRoot -or $tool.VersionInfo.CompanyName -cne "Microsoft Corporation") {
         throw "$Name is outside the exact Windows Kits root or lacks Microsoft Corporation metadata."
@@ -72,7 +72,7 @@ function Get-TrustedWindowsAppCertificationKit {
             $reachedRoot = $true
             break
         }
-        $current = $current.Parent
+        $current = if ($current -is [IO.FileInfo]) { $current.Directory } else { $current.Parent }
     }
     if (-not $reachedRoot -or $tool.VersionInfo.CompanyName -cne "Microsoft Corporation") {
         throw "appcert.exe is outside the exact Windows Kits root or lacks Microsoft Corporation metadata."
