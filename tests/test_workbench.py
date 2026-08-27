@@ -1084,8 +1084,10 @@ class AnalysisEngineTests(unittest.TestCase):
 
         launcher = r"C:\Program Files (x86)\IBM Research\statisticspython3.bat"
         command = build_cmd_invocation(r"C:\Windows\System32\cmd.exe", launcher, driver)
-        self.assertEqual(command[:5], [r"C:\Windows\System32\cmd.exe", "/d", "/v:off", "/s", "/c"])
-        self.assertEqual(command[5], f'call "{launcher}" "{driver}"')
+        self.assertEqual(
+            command,
+            f'"C:\\Windows\\System32\\cmd.exe" /d /v:off /s /c ""{launcher}" "{driver}""',
+        )
 
     @unittest.skipUnless(os.name == "nt", "requires the real Windows cmd.exe")
     def test_windows_cmd_invocation_round_trips_complex_quoted_paths(self) -> None:
@@ -1095,8 +1097,10 @@ class AnalysisEngineTests(unittest.TestCase):
             launcher = root / "launcher test.bat"
             output = root / "result (ok).txt"
             launcher.write_text('@echo off\r\n> "%~1" echo ok\r\n', encoding="utf-8")
+            command_processor = system_cmd_path()
             completed = subprocess.run(
-                build_cmd_invocation(system_cmd_path(), launcher, output),
+                build_cmd_invocation(command_processor, launcher, output),
+                executable=str(command_processor),
                 capture_output=True,
                 check=False,
             )
@@ -1152,10 +1156,15 @@ class AnalysisEngineTests(unittest.TestCase):
                 result = runner.run(output / "run_with_spss_python.sps", output, 30)
 
             command = popen.call_args.args[0]
-            self.assertEqual(command[:5], [r"C:\Windows\System32\cmd.exe", "/d", "/v:off", "/s", "/c"])
             self.assertEqual(
-                command[5],
-                'call "{}" "{}"'.format(installed["pythonLauncher"], driver),
+                command,
+                '"C:\\Windows\\System32\\cmd.exe" /d /v:off /s /c ""{}" "{}""'.format(
+                    installed["pythonLauncher"], driver
+                ),
+            )
+            self.assertEqual(
+                popen.call_args.kwargs["executable"],
+                r"C:\Windows\System32\cmd.exe",
             )
             self.assertEqual(popen.call_args.kwargs["cwd"], output)
             self.assertNotIn("text", popen.call_args.kwargs)

@@ -38,19 +38,21 @@ def build_cmd_invocation(
     command_processor: str | Path,
     launcher: str | Path,
     driver: str | Path,
-) -> list[str]:
-    """Build one quoted ``cmd.exe`` command without invoking a shell in Python.
+) -> str:
+    """Build one raw Windows command line for an explicitly pinned ``cmd.exe``.
 
     The command parser boundary accepts only the path alphabet validated above.
-    ``call`` keeps the IBM batch launcher's exit status attached to this bounded
-    command processor without creating a repository-controlled wrapper file.
+    Passing the command as a Python argument sequence would apply C-runtime
+    backslash quoting to the embedded quote marks; ``cmd.exe`` then treats those
+    marks as part of the batch filename.  The raw command line uses Microsoft's
+    documented outer quote pair for ``/s /c``.  ``Popen(executable=...)`` still
+    pins process creation to the System32 executable resolved above.
     """
 
     cmd = validate_cmd_path(command_processor, label="System cmd.exe path")
     batch = validate_cmd_path(launcher, label="IBM SPSS launcher path")
     script = validate_cmd_path(driver, label="Survey Data Workbench job path")
-    command = f'call "{batch}" "{script}"'
-    return [cmd, "/d", "/v:off", "/s", "/c", command]
+    return f'"{cmd}" /d /v:off /s /c ""{batch}" "{script}""'
 
 
 def decode_captured_output(value: bytes | str | None) -> str:
@@ -249,6 +251,7 @@ class WindowsSpssRunner:
         try:
             process = subprocess.Popen(
                 invocation,
+                executable=str(command_processor),
                 cwd=output_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
