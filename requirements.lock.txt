@@ -9,7 +9,7 @@ importlib_metadata==8.7.1
 itsdangerous==2.2.0
 Jinja2==3.1.6
 MarkupSafe==3.0.3
-narwhals==2.21.0
+narwhals==2.24.0
 numpy==2.0.2
 openpyxl==3.1.5
 pandas==2.3.3
