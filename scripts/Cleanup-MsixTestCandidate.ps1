@@ -19,9 +19,11 @@ if (-not (Test-Path -LiteralPath $stateRoot -PathType Container)) {
     return
 }
 $reparseItems = @(
-    Get-Item -LiteralPath $stateRoot -Force
-    Get-ChildItem -LiteralPath $stateRoot -Recurse -Force -ErrorAction Stop
-) | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }
+    @(
+        Get-Item -LiteralPath $stateRoot -Force
+        Get-ChildItem -LiteralPath $stateRoot -Recurse -Force -ErrorAction Stop
+    ) | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }
+)
 if ($reparseItems.Count -gt 0) {
     throw "QA signing state contains a reparse point; refusing recursive cleanup."
 }

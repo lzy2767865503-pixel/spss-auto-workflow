@@ -192,6 +192,11 @@ if ($preexistingProcesses.Count -gt 0) {
     throw "Hosted runner already contains Survey Data Workbench processes."
 }
 
+$sourceLayout = Join-Path $candidate "layout"
+& (Join-Path $PSScriptRoot "Test-WindowsSidecar.ps1") `
+    -LayoutDirectory $sourceLayout `
+    -DiagnosticsDirectory (Join-Path $diagnostics "hash-verified-core")
+
 $installAttempted = $false
 $packageFullName = $null
 $packageFamilyName = $null
@@ -224,7 +229,6 @@ try {
         throw "Hosted installed manifest differs from the reserved Store identity or executable."
     }
 
-    $sourceLayout = Join-Path $candidate "layout"
     $installedDesktop = Join-Path $installLocation "StatFlow.Workbench.Desktop.exe"
     $installedBackend = Join-Path $installLocation "backend\statflow-backend.exe"
     $sourcePayload = Get-RegularTreeManifest -Root $sourceLayout -Label "Hash-verified candidate payload"
@@ -237,10 +241,6 @@ try {
             throw "Installed payload file differs from the hash-verified candidate layout: $($entry.Key)"
         }
     }
-
-    & (Join-Path $PSScriptRoot "Test-WindowsSidecar.ps1") `
-        -LayoutDirectory $installLocation `
-        -DiagnosticsDirectory (Join-Path $diagnostics "installed-core")
 
     $appUserModelId = "$packageFamilyName!StatFlowWorkbench"
     $desktopProcessId = [StatFlow.Hosted.PackageActivator]::Activate($appUserModelId)

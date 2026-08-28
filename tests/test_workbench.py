@@ -244,6 +244,12 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertIn("PackageActivator", hosted_smoke)
         self.assertIn("Get-RegularTreeManifest", hosted_smoke)
         self.assertIn("installed payload file differs", hosted_smoke.lower())
+        self.assertIn("-LayoutDirectory $sourceLayout", hosted_smoke)
+        self.assertNotIn("-LayoutDirectory $installLocation", hosted_smoke)
+        self.assertLess(
+            hosted_smoke.index("Test-WindowsSidecar.ps1"),
+            hosted_smoke.index("Add-AppxPackage"),
+        )
         self.assertIn("OpenExisting($uiReadyEventName)", hosted_smoke)
         self.assertIn("installedPayloadVerified", hosted_smoke)
         self.assertIn("desktopUiReadyVerified", hosted_smoke)
@@ -256,6 +262,7 @@ class AnalysisEngineTests(unittest.TestCase):
         self.assertIn("CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8", cleanup)
         self.assertIn("direct statflow-msix-test-* child of RUNNER_TEMP", cleanup)
         self.assertIn("reparse point", cleanup)
+        self.assertIn("$reparseItems = @(\n    @(\n", cleanup)
         self.assertNotIn("CN=StatFlowDevelopment", cleanup)
         main_window = (
             ROOT / "desktop" / "StatFlow.Workbench.Desktop" / "MainWindow.xaml.cs"
