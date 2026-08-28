@@ -84,16 +84,24 @@ function New-OwnedProcessRecord($Process) {
     }
 }
 
-function Get-OwnedProcess($Record) {
+function Get-OwnedProcess($Record, [switch]$RequireExactAlive) {
     $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Record.Id)" -ErrorAction SilentlyContinue
-    if (-not $current) { return $null }
+    if (-not $current) {
+        if ($RequireExactAlive) { throw "Hosted smoke process $($Record.Id) exited before its planned termination." }
+        return $null
+    }
     $currentPath = if ($current.ExecutablePath) { [IO.Path]::GetFullPath([string]$current.ExecutablePath) } else { "" }
-    $currentCreated = ([DateTime]$current.CreationDate).ToUniversalTime().ToString("o")
+    $currentCreated = if ($current.CreationDate) {
+        ([DateTime]$current.CreationDate).ToUniversalTime().ToString("o")
+    } else { "" }
     if ([string]$current.Name -ine [string]$Record.Name -or
         $currentPath -ine [string]$Record.Path -or
         $currentCreated -cne [string]$Record.Created -or
         [uint32]$current.ParentProcessId -ne [uint32]$Record.ParentId) {
-        throw "Hosted smoke PID $($Record.Id) no longer has its captured process identity."
+        if ($RequireExactAlive) {
+            throw "Hosted smoke PID $($Record.Id) changed identity before planned termination: captured '$($Record.Name)'/'$($Record.Path)'/$($Record.ParentId)/'$($Record.Created)', current '$($current.Name)'/'$currentPath'/$($current.ParentProcessId)/'$currentCreated'."
+        }
+        return $null
     }
     return $current
 }
@@ -284,6 +292,8 @@ try {
         throw "Hosted desktop UI readiness event was not signaled."
     }
 
+    Get-OwnedProcess -Record $desktopRecord -RequireExactAlive | Out-Null
+    Get-OwnedProcess -Record $backendRecord -RequireExactAlive | Out-Null
     Stop-OwnedProcess -Record $desktopRecord
     Wait-Until `
         -Condition { -not (Get-OwnedProcess -Record $backendRecord) } `

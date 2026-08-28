@@ -251,6 +251,9 @@ class AnalysisEngineTests(unittest.TestCase):
             hosted_smoke.index("Add-AppxPackage"),
         )
         self.assertIn("OpenExisting($uiReadyEventName)", hosted_smoke)
+        self.assertIn("[switch]$RequireExactAlive", hosted_smoke)
+        self.assertEqual(hosted_smoke.count("-RequireExactAlive | Out-Null"), 2)
+        self.assertIn("return $null", hosted_smoke)
         self.assertIn("installedPayloadVerified", hosted_smoke)
         self.assertIn("desktopUiReadyVerified", hosted_smoke)
         self.assertIn("Verify-ArtifactHashes.ps1", hosted_smoke)
