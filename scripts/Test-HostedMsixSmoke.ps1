@@ -75,44 +75,92 @@ function New-OwnedProcessRecord($Process) {
     if (-not $Process -or -not $Process.ExecutablePath -or -not $Process.CreationDate) {
         throw "Hosted smoke process does not expose an exact path and creation identity."
     }
-    return [pscustomobject]@{
-        Id = [uint32]$Process.ProcessId
-        Name = [string]$Process.Name
-        Path = [IO.Path]::GetFullPath([string]$Process.ExecutablePath)
-        Created = ([DateTime]$Process.CreationDate).ToUniversalTime().ToString("o")
-        ParentId = [uint32]$Process.ParentProcessId
+    $nativeProcess = $null
+    try {
+        $nativeProcess = [Diagnostics.Process]::GetProcessById([int]$Process.ProcessId)
+        [void]$nativeProcess.Handle
+        $capturedCreation = ([DateTime]$Process.CreationDate).ToUniversalTime()
+        $capturedPath = [IO.Path]::GetFullPath([string]$Process.ExecutablePath)
+        $confirmed = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.ProcessId)" -ErrorAction SilentlyContinue
+        $confirmedPath = if ($confirmed -and $confirmed.ExecutablePath) {
+            [IO.Path]::GetFullPath([string]$confirmed.ExecutablePath)
+        } else { "" }
+        $confirmedCreation = if ($confirmed -and $confirmed.CreationDate) {
+            ([DateTime]$confirmed.CreationDate).ToUniversalTime().ToString("o")
+        } else { "" }
+        $nativeCreation = $nativeProcess.StartTime.ToUniversalTime()
+        $expectedProcessName = [IO.Path]::GetFileNameWithoutExtension([string]$Process.Name)
+        if (-not $confirmed -or [string]$confirmed.Name -ine [string]$Process.Name -or
+            $confirmedPath -ine $capturedPath -or
+            $confirmedCreation -cne $capturedCreation.ToString("o") -or
+            [uint32]$confirmed.ParentProcessId -ne [uint32]$Process.ParentProcessId -or
+            $nativeProcess.HasExited -or $nativeProcess.ProcessName -ine $expectedProcessName -or
+            [Math]::Abs(($nativeCreation - $capturedCreation).TotalSeconds) -gt 1) {
+            throw "Hosted smoke process changed while its stable OS handle was captured."
+        }
+        return [pscustomobject]@{
+            Id = [uint32]$Process.ProcessId
+            Name = [string]$Process.Name
+            Path = $capturedPath
+            Created = $capturedCreation.ToString("o")
+            ParentId = [uint32]$Process.ParentProcessId
+            ProcessObject = $nativeProcess
+        }
+    } catch {
+        if ($nativeProcess) { $nativeProcess.Dispose() }
+        throw
     }
 }
 
 function Get-OwnedProcess($Record, [switch]$RequireExactAlive) {
-    $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Record.Id)" -ErrorAction SilentlyContinue
-    if (-not $current) {
-        if ($RequireExactAlive) { throw "Hosted smoke process $($Record.Id) exited before its planned termination." }
+    $owned = $Record.ProcessObject
+    if (-not $owned) {
+        if ($RequireExactAlive) { throw "Hosted smoke process $($Record.Id) has no stable OS handle." }
         return $null
     }
-    $currentPath = if ($current.ExecutablePath) { [IO.Path]::GetFullPath([string]$current.ExecutablePath) } else { "" }
-    $currentCreated = if ($current.CreationDate) {
-        ([DateTime]$current.CreationDate).ToUniversalTime().ToString("o")
-    } else { "" }
-    if ([string]$current.Name -ine [string]$Record.Name -or
-        $currentPath -ine [string]$Record.Path -or
-        $currentCreated -cne [string]$Record.Created -or
-        [uint32]$current.ParentProcessId -ne [uint32]$Record.ParentId) {
-        if ($RequireExactAlive) {
-            throw "Hosted smoke PID $($Record.Id) changed identity before planned termination: captured '$($Record.Name)'/'$($Record.Path)'/$($Record.ParentId)/'$($Record.Created)', current '$($current.Name)'/'$currentPath'/$($current.ParentProcessId)/'$currentCreated'."
-        }
+    try {
+        if (-not $owned.HasExited) { return $owned }
+    } catch [InvalidOperationException] {
+        if ($RequireExactAlive) { throw }
         return $null
     }
-    return $current
+    if ($RequireExactAlive) { throw "Hosted smoke process $($Record.Id) exited before its planned termination." }
+    return $null
 }
 
-function Stop-OwnedProcess($Record) {
-    if (-not (Get-OwnedProcess -Record $Record)) { return }
-    Stop-Process -Id ([uint32]$Record.Id) -Force -ErrorAction Stop
-    Wait-Until `
-        -Condition { -not (Get-Process -Id ([uint32]$Record.Id) -ErrorAction SilentlyContinue) } `
-        -FailureMessage "Hosted smoke process $($Record.Id) remained alive after exact termination." `
-        -TimeoutSeconds 30 | Out-Null
+function Close-OwnedProcessRecord($Record) {
+    if ($Record -and $Record.ProcessObject) {
+        $Record.ProcessObject.Dispose()
+        $Record.ProcessObject = $null
+    }
+}
+
+function Stop-OwnedProcess($Record, [switch]$RequireExactAlive) {
+    $owned = Get-OwnedProcess -Record $Record -RequireExactAlive:$RequireExactAlive
+    if (-not $owned) {
+        Close-OwnedProcessRecord -Record $Record
+        return
+    }
+    try { $owned.Kill() }
+    catch [InvalidOperationException] {
+        if ($owned.HasExited) {
+            Close-OwnedProcessRecord -Record $Record
+            if ($RequireExactAlive) { throw "Hosted smoke process $($Record.Id) exited before handle-bound termination." }
+            return
+        }
+        throw
+    }
+    if (-not $owned.WaitForExit(30000)) {
+        throw "Hosted smoke process $($Record.Id) remained alive after handle-bound termination."
+    }
+    Close-OwnedProcessRecord -Record $Record
+}
+
+function Wait-OwnedProcessExit($Record, [string]$FailureMessage) {
+    $owned = $Record.ProcessObject
+    if (-not $owned) { return }
+    if (-not $owned.WaitForExit(30000)) { throw $FailureMessage }
+    Close-OwnedProcessRecord -Record $Record
 }
 
 function Get-RegularTreeManifest([string]$Root, [string]$Label) {
@@ -292,13 +340,9 @@ try {
         throw "Hosted desktop UI readiness event was not signaled."
     }
 
-    Get-OwnedProcess -Record $desktopRecord -RequireExactAlive | Out-Null
     Get-OwnedProcess -Record $backendRecord -RequireExactAlive | Out-Null
-    Stop-OwnedProcess -Record $desktopRecord
-    Wait-Until `
-        -Condition { -not (Get-OwnedProcess -Record $backendRecord) } `
-        -FailureMessage "Hosted packaged backend survived desktop termination." `
-        -TimeoutSeconds 30 | Out-Null
+    Stop-OwnedProcess -Record $desktopRecord -RequireExactAlive
+    Wait-OwnedProcessExit -Record $backendRecord -FailureMessage "Hosted packaged backend survived desktop termination."
     $desktopRecord = $null
     $backendRecord = $null
     $uiReadyHandle.Dispose()

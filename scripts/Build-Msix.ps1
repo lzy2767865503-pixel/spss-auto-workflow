@@ -22,6 +22,11 @@ if (-not $IsWindows) { throw "Build-Msix.ps1 must run on Windows." }
 if (-not (Test-Path (Join-Path $LayoutDirectory "StatFlow.Workbench.Desktop.exe"))) {
     throw "The Windows layout is incomplete."
 }
+$debugSymbols = @(Get-ChildItem -LiteralPath $LayoutDirectory -Recurse -File -Force | Where-Object { $_.Extension -ieq ".pdb" })
+if ($debugSymbols.Count -gt 0) {
+    throw "MSIX layout contains forbidden PDB debug symbols: $($debugSymbols.FullName -join ', ')"
+}
+Write-Host "MSIX layout debug-symbol gate passed: no PDB files."
 if ($Development) {
     if (-not $IdentityName) { $IdentityName = "LAISystems.StatFlowWorkbench.Dev" }
     if (-not $Publisher) { $Publisher = "CN=StatFlowDevelopment" }

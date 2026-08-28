@@ -96,6 +96,13 @@ if ($LASTEXITCODE -ne 0) { throw ".NET desktop publish failed." }
 $backendTarget = Join-Path $layout "backend"
 New-Item -ItemType Directory -Path $backendTarget -Force | Out-Null
 Copy-Item -Recurse -Force (Join-Path $backendDist "statflow-backend\*") $backendTarget
+if ($Configuration -eq "Release") {
+    $debugSymbols = @(Get-ChildItem -LiteralPath $layout -Recurse -File -Force | Where-Object { $_.Extension -ieq ".pdb" })
+    if ($debugSymbols.Count -gt 0) {
+        throw "Release layout contains forbidden PDB debug symbols: $($debugSymbols.FullName -join ', ')"
+    }
+    Write-Host "Release layout debug-symbol gate passed: no PDB files."
+}
 
 $legalTarget = Join-Path $layout "legal"
 New-Item -ItemType Directory -Path $legalTarget -Force | Out-Null

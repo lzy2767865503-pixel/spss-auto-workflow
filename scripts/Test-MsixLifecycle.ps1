@@ -225,41 +225,99 @@ function Assert-ExactInstalledManifest($Package) {
     return $manifest
 }
 
-function New-OwnedProcessRecord($Process) {
+function New-OwnedProcessRecord($Process, [switch]$AllowAlreadyExited) {
     if (-not $Process -or -not $Process.ExecutablePath -or -not $Process.CreationDate) {
         throw "Owned process did not expose an executable path and creation identity."
     }
-    return [pscustomobject]@{
-        Id = [uint32]$Process.ProcessId
-        Name = [string]$Process.Name
-        ExecutablePath = [IO.Path]::GetFullPath([string]$Process.ExecutablePath)
-        CreationDate = ([DateTime]$Process.CreationDate).ToUniversalTime().ToString("o")
-        ParentProcessId = [uint32]$Process.ParentProcessId
+    $nativeProcess = $null
+    try {
+        $nativeProcess = [Diagnostics.Process]::GetProcessById([int]$Process.ProcessId)
+        [void]$nativeProcess.Handle
+        $capturedCreation = ([DateTime]$Process.CreationDate).ToUniversalTime()
+        $capturedPath = [IO.Path]::GetFullPath([string]$Process.ExecutablePath)
+        $confirmed = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.ProcessId)" -ErrorAction SilentlyContinue
+        $confirmedPath = if ($confirmed -and $confirmed.ExecutablePath) {
+            [IO.Path]::GetFullPath([string]$confirmed.ExecutablePath)
+        } else { "" }
+        $confirmedCreation = if ($confirmed -and $confirmed.CreationDate) {
+            ([DateTime]$confirmed.CreationDate).ToUniversalTime().ToString("o")
+        } else { "" }
+        $nativeCreation = $nativeProcess.StartTime.ToUniversalTime()
+        $expectedProcessName = [IO.Path]::GetFileNameWithoutExtension([string]$Process.Name)
+        if (-not $confirmed -or [string]$confirmed.Name -ine [string]$Process.Name -or
+            $confirmedPath -ine $capturedPath -or
+            $confirmedCreation -cne $capturedCreation.ToString("o") -or
+            [uint32]$confirmed.ParentProcessId -ne [uint32]$Process.ParentProcessId -or
+            $nativeProcess.HasExited -or $nativeProcess.ProcessName -ine $expectedProcessName -or
+            [Math]::Abs(($nativeCreation - $capturedCreation).TotalSeconds) -gt 1) {
+            if ($AllowAlreadyExited) {
+                $nativeProcess.Dispose()
+                return $null
+            }
+            throw "Owned process changed while its stable OS handle was captured."
+        }
+        return [pscustomobject]@{
+            Id = [uint32]$Process.ProcessId
+            Name = [string]$Process.Name
+            ExecutablePath = $capturedPath
+            CreationDate = $capturedCreation.ToString("o")
+            ParentProcessId = [uint32]$Process.ParentProcessId
+            ProcessObject = $nativeProcess
+        }
+    } catch {
+        $alreadyExited = -not $nativeProcess
+        if ($nativeProcess) {
+            try { $alreadyExited = $nativeProcess.HasExited } catch { $alreadyExited = $true }
+            $nativeProcess.Dispose()
+        }
+        if ($AllowAlreadyExited -and $alreadyExited) { return $null }
+        throw
     }
 }
 
 function Assert-OwnedProcessIdentity($Record) {
-    $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Record.Id)" -ErrorAction SilentlyContinue
-    if (-not $current) { return $null }
-    $currentCreation = ([DateTime]$current.CreationDate).ToUniversalTime().ToString("o")
-    $currentPath = if ($current.ExecutablePath) { [IO.Path]::GetFullPath([string]$current.ExecutablePath) } else { "" }
-    if ([string]$current.Name -ine [string]$Record.Name -or
-        $currentPath -ine [string]$Record.ExecutablePath -or
-        $currentCreation -cne [string]$Record.CreationDate -or
-        [uint32]$current.ParentProcessId -ne [uint32]$Record.ParentProcessId) {
-        throw "PID $($Record.Id) no longer matches the owned name/path/creation/parent identity."
-    }
-    return $current
+    $owned = $Record.ProcessObject
+    if (-not $owned) { throw "Owned process $($Record.Id) has no stable OS handle." }
+    if ($owned.HasExited) { throw "Owned process $($Record.Id) exited before the required readiness check." }
+    return $owned
 }
 
-function Stop-OwnedProcess($Record, [string]$Label) {
-    $current = Assert-OwnedProcessIdentity -Record $Record
-    if (-not $current) { return }
-    Stop-Process -Id ([uint32]$Record.Id) -Force -ErrorAction Stop
-    Wait-Until `
-        -Condition { -not (Get-Process -Id ([uint32]$Record.Id) -ErrorAction SilentlyContinue) } `
-        -FailureMessage "$Label remained alive" `
-        -TimeoutSeconds 30 | Out-Null
+function Close-OwnedProcessRecord($Record) {
+    if ($Record -and $Record.ProcessObject) {
+        $Record.ProcessObject.Dispose()
+        $Record.ProcessObject = $null
+    }
+}
+
+function Stop-OwnedProcess($Record, [string]$Label, [switch]$RequireExactAlive) {
+    $owned = $Record.ProcessObject
+    if (-not $owned) {
+        if ($RequireExactAlive) { throw "$Label has no stable OS handle." }
+        return
+    }
+    if ($owned.HasExited) {
+        Close-OwnedProcessRecord -Record $Record
+        if ($RequireExactAlive) { throw "$Label exited before its planned termination." }
+        return
+    }
+    try { $owned.Kill() }
+    catch [InvalidOperationException] {
+        if ($owned.HasExited) {
+            Close-OwnedProcessRecord -Record $Record
+            if ($RequireExactAlive) { throw "$Label exited before handle-bound termination." }
+            return
+        }
+        throw
+    }
+    if (-not $owned.WaitForExit(30000)) { throw "$Label remained alive after handle-bound termination." }
+    Close-OwnedProcessRecord -Record $Record
+}
+
+function Wait-OwnedProcessExit($Record, [string]$FailureMessage) {
+    $owned = $Record.ProcessObject
+    if (-not $owned) { return }
+    if (-not $owned.WaitForExit(30000)) { throw $FailureMessage }
+    Close-OwnedProcessRecord -Record $Record
 }
 
 function Wait-ExternalDesktopReady($DesktopRecord, $BackendRecord, [string]$Label) {
@@ -267,8 +325,8 @@ function Wait-ExternalDesktopReady($DesktopRecord, $BackendRecord, [string]$Labe
         throw "$Label sidecar record does not belong to the exact desktop process."
     }
     Wait-Until -Condition {
-        Assert-OwnedProcessIdentity -Record $DesktopRecord | Out-Null
-        $process = Get-Process -Id ([uint32]$DesktopRecord.Id) -ErrorAction SilentlyContinue
+        $process = Assert-OwnedProcessIdentity -Record $DesktopRecord
+        $process.Refresh()
         if ($process -and $process.MainWindowHandle -ne 0 -and
             $process.MainWindowTitle -ceq "Survey Data Workbench by LAI ZEYU") { return $true }
         return $false
@@ -276,6 +334,7 @@ function Wait-ExternalDesktopReady($DesktopRecord, $BackendRecord, [string]$Labe
     Wait-Until -Condition {
         Assert-OwnedProcessIdentity -Record $BackendRecord | Out-Null
         $listeners = @(Get-NetTCPConnection -State Listen -OwningProcess ([uint32]$BackendRecord.Id) -ErrorAction SilentlyContinue)
+        Assert-OwnedProcessIdentity -Record $BackendRecord | Out-Null
         if ($listeners.Count -eq 1 -and [string]$listeners[0].LocalAddress -ceq "127.0.0.1" -and
             [int]$listeners[0].LocalPort -ge 1024 -and [int]$listeners[0].LocalPort -le 65535) { return $true }
         return $false
@@ -296,7 +355,11 @@ function Wait-ExternalDesktopReady($DesktopRecord, $BackendRecord, [string]$Labe
 }
 
 function Get-DescendantProcesses {
-    param([Parameter(Mandatory = $true)][uint32]$RootProcessId)
+    param(
+        [Parameter(Mandatory = $true)][uint32]$RootProcessId,
+        [Parameter(Mandatory = $true)][DateTime]$NotBeforeUtc
+    )
+    $notBefore = $NotBeforeUtc.ToUniversalTime()
     $all = @(Get-CimInstance Win32_Process)
     $known = [Collections.Generic.HashSet[uint32]]::new()
     [void]$known.Add($RootProcessId)
@@ -306,6 +369,8 @@ function Get-DescendantProcesses {
         $changed = $false
         foreach ($process in $all) {
             if ($known.Contains([uint32]$process.ProcessId)) { continue }
+            if (-not $process.CreationDate -or
+                ([DateTime]$process.CreationDate).ToUniversalTime() -lt $notBefore) { continue }
             if ($known.Contains([uint32]$process.ParentProcessId)) {
                 [void]$known.Add([uint32]$process.ProcessId)
                 $result.Add($process)
@@ -382,6 +447,8 @@ $packageDataRoot = $null
 $desktopProcess = $null
 $backendProcessId = $null
 $webViewProcessIds = @()
+$firstWebViewRecords = [Collections.Generic.List[object]]::new()
+$secondWebViewRecords = [Collections.Generic.List[object]]::new()
 $ownedProcessRecords = [Collections.Generic.List[object]]::new()
 $succeeded = $false
 $evidence = [ordered]@{
@@ -552,7 +619,9 @@ try {
 
     $webViews = Wait-Until `
         -Condition {
-            $descendants = @(Get-DescendantProcesses -RootProcessId $firstProcessId)
+            $descendants = @(Get-DescendantProcesses `
+                -RootProcessId $firstProcessId `
+                -NotBeforeUtc ([DateTime]$firstDesktopRecord.CreationDate))
             $matches = @($descendants | Where-Object { $_.Name -ieq "msedgewebview2.exe" })
             if ($matches.Count -gt 0) { return $matches }
             return $null
@@ -562,9 +631,14 @@ try {
     $webViewProcessIds = @($webViews | ForEach-Object { [uint32]$_.ProcessId })
     foreach ($childProcessId in $webViewProcessIds) {
         $webView = @($webViews | Where-Object { [uint32]$_.ProcessId -eq $childProcessId })[0]
-        $ownedProcessRecords.Add((New-OwnedProcessRecord -Process $webView))
+        $childRecord = New-OwnedProcessRecord -Process $webView -AllowAlreadyExited
+        if ($childRecord) {
+            $firstWebViewRecords.Add($childRecord)
+            $ownedProcessRecords.Add($childRecord)
+        }
     }
-    $evidence.webViewProcessCount = $webViewProcessIds.Count
+    if ($firstWebViewRecords.Count -eq 0) { throw "No stable WebView2 process remained for lifecycle verification." }
+    $evidence.webViewProcessCount = $firstWebViewRecords.Count
 
     foreach ($requiredDirectory in @("jobs", "logs", "WebView2")) {
         $requiredPath = Join-Path $localState $requiredDirectory
@@ -576,17 +650,13 @@ try {
     $evidence.firstExternalLaunchVerified = $true
     $evidence.firstUiReadySignalVerified = $true
 
-    Stop-OwnedProcess -Record $firstDesktopRecord -Label "The force-terminated WPF process"
-    Wait-Until `
-        -Condition { -not (Assert-OwnedProcessIdentity -Record $firstBackendRecord) } `
-        -FailureMessage "The sidecar survived forced WPF termination; Job Object/watchdog failed." `
-        -TimeoutSeconds 30 | Out-Null
-    foreach ($childProcessId in $webViewProcessIds) {
-        $childRecord = @($ownedProcessRecords | Where-Object { [uint32]$_.Id -eq [uint32]$childProcessId })[0]
-        Wait-Until `
-            -Condition { -not (Assert-OwnedProcessIdentity -Record $childRecord) } `
-            -FailureMessage "A WebView2 child survived forced WPF termination; Job Object cleanup failed." `
-            -TimeoutSeconds 30 | Out-Null
+    Assert-OwnedProcessIdentity -Record $firstBackendRecord | Out-Null
+    $liveFirstWebViews = @($firstWebViewRecords | Where-Object { $_.ProcessObject -and -not $_.ProcessObject.HasExited })
+    if ($liveFirstWebViews.Count -eq 0) { throw "No captured WebView2 process remained alive immediately before forced desktop termination." }
+    Stop-OwnedProcess -Record $firstDesktopRecord -Label "The force-terminated WPF process" -RequireExactAlive
+    Wait-OwnedProcessExit -Record $firstBackendRecord -FailureMessage "The sidecar survived forced WPF termination; Job Object/watchdog failed."
+    foreach ($childRecord in @($firstWebViewRecords)) {
+        Wait-OwnedProcessExit -Record $childRecord -FailureMessage "A WebView2 child survived forced WPF termination; Job Object cleanup failed."
     }
     $evidence.forcedExitKilledSidecar = $true
 
@@ -619,7 +689,9 @@ try {
     if ([IO.Path]::GetFullPath([string]$secondBackend.ExecutablePath) -cne $expectedBackendExecutable) { throw "Relaunched sidecar did not execute the literal packaged backend path." }
     $secondWebViews = Wait-Until `
         -Condition {
-            $descendants = @(Get-DescendantProcesses -RootProcessId $secondProcessId)
+            $descendants = @(Get-DescendantProcesses `
+                -RootProcessId $secondProcessId `
+                -NotBeforeUtc ([DateTime]$secondDesktopRecord.CreationDate))
             $matches = @($descendants | Where-Object { $_.Name -ieq "msedgewebview2.exe" })
             if ($matches.Count -gt 0) { return $matches }
             return $null
@@ -629,25 +701,26 @@ try {
     $secondWebViewProcessIds = @($secondWebViews | ForEach-Object { [uint32]$_.ProcessId })
     foreach ($childProcessId in $secondWebViewProcessIds) {
         $webView = @($secondWebViews | Where-Object { [uint32]$_.ProcessId -eq $childProcessId })[0]
-        $ownedProcessRecords.Add((New-OwnedProcessRecord -Process $webView))
+        $childRecord = New-OwnedProcessRecord -Process $webView -AllowAlreadyExited
+        if ($childRecord) {
+            $secondWebViewRecords.Add($childRecord)
+            $ownedProcessRecords.Add($childRecord)
+        }
     }
+    if ($secondWebViewRecords.Count -eq 0) { throw "No stable relaunched WebView2 process remained for lifecycle verification." }
     Wait-ExternalDesktopReady -DesktopRecord $secondDesktopRecord -BackendRecord $secondBackendRecord -Label "Relaunched installed app"
     $evidence.secondExternalLaunchVerified = $true
     $evidence.secondUiReadySignalVerified = $true
     $evidence.relaunchSucceeded = $true
     Set-Content -LiteralPath (Join-Path $localState "ci-uninstall-probe.txt") -Value "pass-$Pass" -Encoding UTF8
 
-    Stop-OwnedProcess -Record $secondDesktopRecord -Label "Relaunched desktop"
-    Wait-Until `
-        -Condition { -not (Assert-OwnedProcessIdentity -Record $secondBackendRecord) } `
-        -FailureMessage "The relaunched sidecar survived desktop termination." `
-        -TimeoutSeconds 30 | Out-Null
-    foreach ($childProcessId in $secondWebViewProcessIds) {
-        $childRecord = @($ownedProcessRecords | Where-Object { [uint32]$_.Id -eq [uint32]$childProcessId })[0]
-        Wait-Until `
-            -Condition { -not (Assert-OwnedProcessIdentity -Record $childRecord) } `
-            -FailureMessage "A relaunched WebView2 child survived desktop termination." `
-            -TimeoutSeconds 30 | Out-Null
+    Assert-OwnedProcessIdentity -Record $secondBackendRecord | Out-Null
+    $liveSecondWebViews = @($secondWebViewRecords | Where-Object { $_.ProcessObject -and -not $_.ProcessObject.HasExited })
+    if ($liveSecondWebViews.Count -eq 0) { throw "No captured relaunched WebView2 process remained alive immediately before desktop termination." }
+    Stop-OwnedProcess -Record $secondDesktopRecord -Label "Relaunched desktop" -RequireExactAlive
+    Wait-OwnedProcessExit -Record $secondBackendRecord -FailureMessage "The relaunched sidecar survived desktop termination."
+    foreach ($childRecord in @($secondWebViewRecords)) {
+        Wait-OwnedProcessExit -Record $childRecord -FailureMessage "A relaunched WebView2 child survived desktop termination."
     }
     $exactInstalled = @(Get-AppxPackage -Name $IdentityName -ErrorAction Stop |
         Where-Object { $_.PackageFullName -ceq $createdPackageFullName })
@@ -687,7 +760,7 @@ try {
     Write-Host "MSIX lifecycle pass $Pass succeeded for $($evidence.packageFullName)."
 } finally {
     $cleanupErrors = [Collections.Generic.List[string]]::new()
-    foreach ($record in @($ownedProcessRecords | Group-Object Id | ForEach-Object { $_.Group[0] })) {
+    foreach ($record in @($ownedProcessRecords)) {
         try {
             Stop-OwnedProcess -Record $record -Label "Owned process"
         } catch {
