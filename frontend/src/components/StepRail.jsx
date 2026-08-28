@@ -13,14 +13,15 @@ export default function StepRail({ activeStep, jobStatus }) {
       <ol>
         {STEPS.map((step) => {
           const complete = step.number < activeStep || (step.number === 3 && jobStatus === "complete");
+          const formalFailed = step.number === 3 && jobStatus === "formal_failed";
           const active = step.number === activeStep;
           return (
-            <li key={step.number} className={active ? "active" : complete ? "complete" : ""}>
+            <li key={step.number} className={formalFailed ? "warning" : active ? "active" : complete ? "complete" : ""}>
               <span className="step-number">{complete ? <Check size={18} /> : step.number}</span>
               <span className="step-copy">
                 <strong>{step.title}</strong>
                 <small>
-                  {complete ? "已完成" : active ? (step.number === 3 ? "进行中" : "进行中") : step.pending}
+                  {formalFailed ? "预检完成；正式输出未验证" : complete ? "已完成" : active ? "进行中" : step.pending}
                 </small>
               </span>
             </li>

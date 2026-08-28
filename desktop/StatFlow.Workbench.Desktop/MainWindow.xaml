@@ -1,0 +1,27 @@
+<Window x:Class="StatFlow.Workbench.Desktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="Survey Data Workbench by LAI ZEYU"
+        Width="1280"
+        Height="820"
+        MinWidth="900"
+        MinHeight="620"
+        WindowStartupLocation="CenterScreen"
+        Background="White">
+  <Grid>
+    <wv2:WebView2 x:Name="Browser" Visibility="Collapsed" />
+    <Border x:Name="StartupPanel" Background="#F7F9F9">
+      <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="560">
+        <Border Width="56" Height="56" Background="{StaticResource StatFlowTeal}" CornerRadius="10" HorizontalAlignment="Center">
+          <TextBlock Text="S" Foreground="White" FontSize="28" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+        <TextBlock Margin="0,18,0,0" Text="Survey Data Workbench by LAI ZEYU" FontSize="24" FontWeight="SemiBold" HorizontalAlignment="Center" />
+        <TextBlock Margin="0,5,0,0" Text="Independent local survey analysis" Foreground="#657176" FontSize="13" HorizontalAlignment="Center" />
+        <ProgressBar x:Name="StartupProgress" Margin="0,24,0,0" Width="280" Height="5" IsIndeterminate="True" />
+        <TextBlock x:Name="StartupStatus" Margin="0,14,0,0" Text="正在启动安全的本地分析服务…" Foreground="#657176" TextAlignment="Center" TextWrapping="Wrap" />
+        <Button x:Name="CloseButton" Margin="0,22,0,0" Padding="18,8" Content="关闭" Visibility="Collapsed" Click="CloseButton_Click" HorizontalAlignment="Center" />
+      </StackPanel>
+    </Border>
+  </Grid>
+</Window>

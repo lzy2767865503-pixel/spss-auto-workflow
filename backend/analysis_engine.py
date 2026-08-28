@@ -3,12 +3,10 @@ from __future__ import annotations
 import csv
 import json
 import math
-import os
 import re
 import shutil
-import subprocess
-import time
 import zipfile
+import zlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -16,16 +14,46 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+from spss_runner import EXPECTED_FORMAL_OUTPUTS, run_spss_automatically
 
-SPSS_APP = Path(
-    os.environ.get(
-        "SPSS_APP_PATH",
-        "/Applications/IBM SPSS Statistics/IBM SPSS Statistics.app",
-    )
-).expanduser()
-SPSS_BINARY = SPSS_APP / "Contents/MacOS/stats"
+
 SUPPORTED_EXTENSIONS = {".xlsx", ".xls", ".xlsm", ".csv", ".tsv", ".txt", ".sav", ".zsav", ".por"}
+MAX_DATASET_BYTES = 100 * 1024 * 1024
+MAX_DATASET_ROWS = 1_000_000
+MAX_DATASET_COLUMNS = 2_000
+MAX_DATASET_CELLS = 20_000_000
+MAX_DATASET_MEMORY_BYTES = 1024 * 1024 * 1024
+MAX_EXCEL_ARCHIVE_ENTRIES = 20_000
+MAX_EXCEL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_EXCEL_ENTRY_BYTES = 256 * 1024 * 1024
+MAX_EXCEL_COMPRESSION_RATIO = 200
+MAX_BUNDLE_ENTRIES = 128
+MAX_BUNDLE_FILE_BYTES = 512 * 1024 * 1024
+MAX_BUNDLE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 ITEM_PATTERN = re.compile(r"^\s*([A-Za-z][A-Za-z_]{0,15}?)[\s_-]*(\d{1,3})(?=\b|[.\s:_-])")
+SPSS_RESERVED_WORDS = {
+    "ALL",
+    "AND",
+    "BY",
+    "EQ",
+    "GE",
+    "GT",
+    "LE",
+    "LT",
+    "NE",
+    "NOT",
+    "OR",
+    "TO",
+    "WITH",
+}
+MACHINE_SPECIFIC_OUTPUTS = {
+    "run_with_spss_external.py",
+    "run_with_spss_python.sps",
+    "run_spss_windows.cmd",
+    "spss_python_status.json",
+}
+PORTABLE_STATUS_LITERAL_TOKEN = "__SPSS_STATUS_PATH_JSON__"
+PORTABLE_COMMAND_PATH_TOKEN = "__SPSS_OUTPUT_DIR_COMMAND_JSON__"
 
 
 def json_dump(path: Path, value: Any) -> None:
@@ -40,20 +68,104 @@ def safe_float(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def spss_status() -> dict[str, Any]:
-    installed = SPSS_APP.exists() and SPSS_BINARY.exists()
-    return {
-        "installed": installed,
-        "licenseState": "unverified" if installed else "unavailable",
-        "appPath": str(SPSS_APP) if installed else None,
-        "binaryPath": str(SPSS_BINARY) if installed else None,
-        "executionMode": "SPSS 内置 Python + spss.Submit()" if installed else "Python 预检模式",
-        "note": (
-            "已检测到 IBM SPSS Statistics；许可证状态会在正式执行时验证。首次自动操作可能需要允许终端控制“系统事件”。"
-            if installed
-            else "未检测到 IBM SPSS Statistics，仍可生成语法、预检表和下载包。"
-        ),
-    }
+def _validate_regular_dataset_file(path: Path) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("数据文件必须是普通文件")
+    size = path.stat().st_size
+    if size <= 0:
+        raise ValueError("数据文件为空")
+    if size > MAX_DATASET_BYTES:
+        raise ValueError("数据文件超过 100MB，请先拆分数据")
+
+
+def _preflight_excel_archive(path: Path) -> None:
+    if path.suffix.lower() not in {".xlsx", ".xlsm"}:
+        return
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = archive.infolist()
+            if not entries or len(entries) > MAX_EXCEL_ARCHIVE_ENTRIES:
+                raise ValueError("Excel 压缩包的文件数量超出安全范围")
+            total = 0
+            seen: set[str] = set()
+            for entry in entries:
+                name = entry.filename.replace("\\", "/")
+                parts = name.rstrip("/").split("/")
+                if (
+                    not name
+                    or name.startswith("/")
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or name.casefold() in seen
+                    or entry.flag_bits & 0x1
+                ):
+                    raise ValueError("Excel 压缩包包含不安全、重复或加密的条目")
+                seen.add(name.casefold())
+                if entry.file_size < 0 or entry.file_size > MAX_EXCEL_ENTRY_BYTES:
+                    raise ValueError("Excel 压缩包包含过大的单个条目")
+                total += entry.file_size
+                if total > MAX_EXCEL_UNCOMPRESSED_BYTES:
+                    raise ValueError("Excel 解压后的总大小超过 512MB 安全上限")
+                if entry.file_size and entry.compress_size == 0:
+                    raise ValueError("Excel 压缩包包含异常零长度压缩数据")
+                if entry.compress_size and entry.file_size / entry.compress_size > MAX_EXCEL_COMPRESSION_RATIO:
+                    raise ValueError("Excel 压缩比异常，拒绝可能的压缩炸弹")
+            corrupt = archive.testzip()
+            if corrupt is not None:
+                raise ValueError(f"Excel 压缩包包含损坏条目：{corrupt}")
+    except (zipfile.BadZipFile, OSError, RuntimeError, zlib.error) as exc:
+        raise ValueError("Excel 文件不是有效的 Office 压缩包") from exc
+
+
+def _validate_dataset_shape(frame: pd.DataFrame) -> pd.DataFrame:
+    rows, columns = frame.shape
+    if rows > MAX_DATASET_ROWS:
+        raise ValueError(f"数据超过 {MAX_DATASET_ROWS:,} 行安全上限")
+    if columns <= 0 or columns > MAX_DATASET_COLUMNS:
+        raise ValueError(f"数据列数必须介于 1 和 {MAX_DATASET_COLUMNS:,} 之间")
+    if rows * columns > MAX_DATASET_CELLS:
+        raise ValueError(f"数据单元格总数超过 {MAX_DATASET_CELLS:,} 安全上限")
+    memory_usage = getattr(frame, "memory_usage", None)
+    if callable(memory_usage):
+        memory_bytes = int(memory_usage(index=True, deep=True).sum())
+        if memory_bytes > MAX_DATASET_MEMORY_BYTES:
+            raise ValueError("数据解析后内存占用超过 1GB 安全上限")
+    return frame
+
+
+def _bounded_row_read_limit(column_count: int) -> int:
+    if column_count <= 0 or column_count > MAX_DATASET_COLUMNS:
+        raise ValueError(f"数据列数必须介于 1 和 {MAX_DATASET_COLUMNS:,} 之间")
+    return min(MAX_DATASET_ROWS, MAX_DATASET_CELLS // column_count) + 1
+
+
+def _normalized_column_names(columns: list[Any] | tuple[Any, ...]) -> list[str]:
+    normalized: list[str] = []
+    for index, column in enumerate(columns):
+        missing = column is None
+        if not missing:
+            try:
+                missing = bool(pd.isna(column))
+            except (TypeError, ValueError):
+                missing = False
+        text = "" if missing else str(column).strip()
+        normalized.append(text or f"Column_{index + 1}")
+    seen: dict[str, str] = {}
+    collisions: list[str] = []
+    for column in normalized:
+        key = column.casefold()
+        if key in seen:
+            collisions.append(f"{seen[key]!r} / {column!r}")
+        else:
+            seen[key] = column
+    if collisions:
+        raise ValueError("列名在去除空格或忽略大小写后发生冲突：" + ", ".join(collisions[:5]))
+    return normalized
+
+
+def normalize_dataset_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    normalized = _normalized_column_names(list(frame.columns))
+    frame.columns = normalized
+    return frame
 
 
 def _read_delimited(path: Path) -> pd.DataFrame:
@@ -62,23 +174,69 @@ def _read_delimited(path: Path) -> pd.DataFrame:
     last_error: Exception | None = None
     for encoding in encodings:
         try:
-            return pd.read_csv(path, sep=separator, engine="python", encoding=encoding)
+            # Read the literal first row without treating it as a header.
+            # Pandas otherwise silently rewrites exact duplicate names (for
+            # example A/A to A/A.1), bypassing the collision policy.
+            raw_header = pd.read_csv(
+                path,
+                sep=separator,
+                engine="python",
+                encoding=encoding,
+                header=None,
+                nrows=1,
+            )
+            if raw_header.empty:
+                raise ValueError("文本数据缺少列名行")
+            column_names = _normalized_column_names(list(raw_header.iloc[0]))
         except Exception as exc:  # pragma: no cover - depends on uploaded encodings
             last_error = exc
+            continue
+        _validate_dataset_shape(pd.DataFrame(columns=column_names))
+        try:
+            frame = pd.read_csv(
+                path,
+                sep=separator,
+                engine="python",
+                encoding=encoding,
+                nrows=_bounded_row_read_limit(len(column_names)),
+            )
+        except Exception as exc:  # pragma: no cover - depends on uploaded encodings
+            last_error = exc
+            continue
+        if len(frame.columns) != len(column_names):
+            raise ValueError("文本数据的表头列数与解析结果不一致")
+        frame.columns = column_names
+        return _validate_dataset_shape(frame)
     raise ValueError(f"无法读取文本数据：{last_error}")
 
 
 def read_dataset(path: Path, sheet: str | None = None) -> tuple[pd.DataFrame, list[str], str | None]:
+    _validate_regular_dataset_file(path)
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"暂不支持 {suffix or '未知'} 格式")
 
     if suffix in {".xlsx", ".xls", ".xlsm"}:
-        excel = pd.ExcelFile(path)
-        sheets = [str(name) for name in excel.sheet_names]
+        _preflight_excel_archive(path)
+        with pd.ExcelFile(path) as excel:
+            sheets = [str(name) for name in excel.sheet_names]
+        if not sheets or len(sheets) > 1_000:
+            raise ValueError("Excel 工作表数量超出安全范围")
         selected = sheet if sheet in sheets else sheets[0]
-        frame = pd.read_excel(path, sheet_name=selected)
-        return frame, sheets, selected
+        raw_header = pd.read_excel(path, sheet_name=selected, header=None, nrows=1)
+        if raw_header.empty:
+            raise ValueError("Excel 工作表缺少列名行")
+        column_names = _normalized_column_names(list(raw_header.iloc[0]))
+        _validate_dataset_shape(pd.DataFrame(columns=column_names))
+        frame = pd.read_excel(
+            path,
+            sheet_name=selected,
+            nrows=_bounded_row_read_limit(len(column_names)),
+        )
+        if len(frame.columns) != len(column_names):
+            raise ValueError("Excel 工作表的表头列数与解析结果不一致")
+        frame.columns = column_names
+        return _validate_dataset_shape(frame), sheets, selected
 
     if suffix in {".csv", ".tsv", ".txt"}:
         return _read_delimited(path), [], None
@@ -88,11 +246,26 @@ def read_dataset(path: Path, sheet: str | None = None) -> tuple[pd.DataFrame, li
     except ImportError as exc:  # pragma: no cover - dependency is installed by launcher
         raise ValueError("读取 SAV/POR 需要 pyreadstat，请运行启动脚本安装依赖") from exc
 
-    if suffix in {".sav", ".zsav"}:
-        frame, _ = pyreadstat.read_sav(str(path))
-    else:
-        frame, _ = pyreadstat.read_por(str(path))
-    return frame, [], None
+    reader = pyreadstat.read_sav if suffix in {".sav", ".zsav"} else pyreadstat.read_por
+    declared_columns = 0
+    try:
+        _, metadata = reader(str(path), metadataonly=True)
+        declared_rows = int(metadata.number_rows or 0)
+        declared_columns = len(metadata.column_names or [])
+        if declared_rows < 0 or declared_rows > MAX_DATASET_ROWS or not 1 <= declared_columns <= MAX_DATASET_COLUMNS:
+            raise ValueError("SPSS 数据的声明行列数超出安全范围")
+        if declared_rows and declared_columns and declared_rows * declared_columns > MAX_DATASET_CELLS:
+            raise ValueError("SPSS 数据的声明单元格总数超出安全范围")
+        _normalized_column_names(list(metadata.column_names or []))
+    except TypeError as exc:
+        # The pinned reader exposes metadata-only parsing. Silently falling back
+        # without a declared column count would make the cell/memory budget
+        # unenforceable before allocation, so unsupported legacy variants fail
+        # closed instead of being partially or unboundedly read.
+        raise ValueError("当前读取器无法在安全解析前获取 SPSS 数据行列元数据") from exc
+    bounded_rows = _bounded_row_read_limit(declared_columns)
+    frame, _ = reader(str(path), row_limit=bounded_rows)
+    return _validate_dataset_shape(frame), [], None
 
 
 def _item_code(column: str) -> tuple[str, int] | None:
@@ -164,7 +337,7 @@ def tam_models(constructs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def inspect_dataset(path: Path, original_name: str, sheet: str | None = None) -> dict[str, Any]:
     frame, sheets, selected_sheet = read_dataset(path, sheet)
-    frame.columns = [str(column).strip() or f"Column_{index + 1}" for index, column in enumerate(frame.columns)]
+    normalize_dataset_columns(frame)
     numeric_columns = [str(column) for column in frame.columns if _numeric_ratio(frame[column]) >= 0.6]
     constructs = detect_constructs(frame)
     preview = frame.head(5).replace({np.nan: None}).astype(object)
@@ -194,6 +367,8 @@ def sanitize_spss_name(value: str, used: set[str], fallback: str = "V") -> str:
     base = re.sub(r"_+", "_", base).strip("_") or fallback
     if not base[0].isalpha() and base[0] not in {"@", "#", "$"}:
         base = f"{fallback}_{base}"
+    if base.upper() in SPSS_RESERVED_WORDS:
+        base = f"{fallback}_{base}"
     base = base[:56]
     candidate = base
     counter = 2
@@ -205,12 +380,46 @@ def sanitize_spss_name(value: str, used: set[str], fallback: str = "V") -> str:
 
 
 def _spss_quote(value: str) -> str:
-    return value.replace('"', "'").replace("\n", " ")[:240]
+    # Labels are emitted inside both single- and double-quoted SPSS literals.
+    # Remove control characters and convert ASCII quotes so an uploaded label
+    # cannot terminate either literal and inject command syntax.
+    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", value)
+    return cleaned.replace('"', "“").replace("'", "’")[:240]
+
+
+def _spss_path(value: Path) -> str:
+    """Return a quoted-literal-safe, cross-platform SPSS file path."""
+
+    return str(value.resolve()).replace("\\", "/").replace("'", "''")
+
+
+def build_portable_spss_template(
+    syntax: str,
+    *,
+    status_literal: str,
+    spss_output_path: str,
+    forbidden_paths: set[str],
+) -> str:
+    """Replace machine paths with tokens for their two parser contexts."""
+
+    if status_literal not in syntax or spss_output_path not in syntax:
+        raise ValueError("Could not locate every machine-specific SPSS path in generated syntax")
+    portable = syntax.replace(status_literal, PORTABLE_STATUS_LITERAL_TOKEN)
+    portable = portable.replace(spss_output_path, PORTABLE_COMMAND_PATH_TOKEN)
+    for original in forbidden_paths:
+        if original and original in portable:
+            raise ValueError("Portable SPSS template still contains a machine-specific path")
+        escaped = json.dumps(original, ensure_ascii=False)[1:-1] if original else ""
+        if escaped and escaped in portable:
+            raise ValueError("Portable SPSS template still contains a JSON-escaped machine path")
+    return portable
 
 
 def prepare_data(
     frame: pd.DataFrame, constructs: list[dict[str, Any]], output_dir: Path
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, Any]], dict[str, str]]:
+    _validate_dataset_shape(frame)
+    normalize_dataset_columns(frame)
     used: set[str] = set()
     mapping: dict[str, str] = {}
     for column in frame.columns:
@@ -457,7 +666,7 @@ def build_python_preview(
 
     report = {
         "generatedAt": datetime.now().isoformat(timespec="seconds"),
-        "mode": "Python 预检；最终统计输出由 SPSS 内置 Python 生成",
+        "mode": "Python 预检（不是 IBM SPSS 正式输出）",
         "rows": int(len(prepared)),
         "constructs": len(constructs),
         "descriptives": descriptives,
@@ -471,7 +680,7 @@ def build_python_preview(
     lines = [
         "# 自动分析摘要",
         "",
-        "> 本文件是 Python 预检摘要。正式表格与显著性判断以 SPSS 输出的 `.spv` / `.pdf` 为准。",
+        "> 本文件是 Python 预检摘要，不是 IBM SPSS 正式输出。若请求正式执行，请仅使用已通过完成标记与文件完整性验证的 `.spv` / `.pdf`。",
         "",
         f"- 有效导入行数：{len(prepared)}",
         f"- 已配置构念：{len(constructs)}",
@@ -549,7 +758,7 @@ def generate_spss_python_driver(
         "",
         "GET DATA",
         "  /TYPE=TXT",
-        f"  /FILE='{csv_path}'",
+        f"  /FILE='{_spss_path(csv_path)}'",
         "  /ENCODING='UTF8'",
         "  /DELCASE=LINE",
         '  /DELIMITERS=","',
@@ -572,7 +781,7 @@ def generate_spss_python_driver(
                 f'VARIABLE LABELS {construct["composite"]} "{_spss_quote(construct["label"])} composite mean".',
             ]
         )
-    commands.extend(["EXECUTE.", f"SAVE OUTFILE='{sav_path}' /COMPRESSED.", ""])
+    commands.extend(["EXECUTE.", f"SAVE OUTFILE='{_spss_path(sav_path)}' /COMPRESSED.", ""])
 
     if "descriptives" in analyses and (all_items or composites):
         commands.extend(
@@ -639,10 +848,10 @@ def generate_spss_python_driver(
 
     commands.extend(
         [
-            f"OUTPUT SAVE OUTFILE='{spv_path}'.",
+            f"OUTPUT SAVE OUTFILE='{_spss_path(spv_path)}'.",
             "OUTPUT EXPORT",
             "  /CONTENTS EXPORT=VISIBLE LAYERS=PRINTSETTING MODELVIEWS=PRINTSETTING",
-            f"  /PDF DOCUMENTFILE='{pdf_path}'.",
+            f"  /PDF DOCUMENTFILE='{_spss_path(pdf_path)}'.",
         ]
     )
     submitted_commands = "\n".join(commands)
@@ -653,7 +862,14 @@ def generate_spss_python_driver(
         "constructCount": len(constructs),
         "modelCount": len(resolved_models),
     }
-    syntax = f"""* Generated automatically by SPSS Auto Workflow.
+    # `status_path` is consumed by Python's `open()`, not by the SPSS syntax
+    # parser.  In particular, do not use `_spss_path()` here: SPSS escapes an
+    # apostrophe by doubling it, while that transformation would point Python
+    # at a different file for valid paths such as `O'Brien`.
+    status_literal = json.dumps(str(marker_path.resolve()), ensure_ascii=False)
+    commands_literal = json.dumps(submitted_commands, ensure_ascii=False)
+    metadata_json_literal = json.dumps(json.dumps(metadata, ensure_ascii=False), ensure_ascii=False)
+    syntax = f"""* Generated automatically by Survey Data Workbench by LAI ZEYU.
 * All analysis commands below are submitted by SPSS embedded Python.
 BEGIN PROGRAM Python3.
 import datetime
@@ -661,10 +877,11 @@ import json
 import traceback
 import spss
 
-status_path = r"{marker_path}"
-metadata = {json.dumps(metadata, ensure_ascii=False)}
+status_path = {status_literal}
+metadata = json.loads({metadata_json_literal})
+commands = {commands_literal}
 try:
-    spss.Submit(r'''{submitted_commands}''')
+    spss.Submit(commands)
     metadata["status"] = "complete"
     metadata["completedAt"] = datetime.datetime.now().isoformat(timespec="seconds")
 except Exception as exc:
@@ -678,137 +895,105 @@ finally:
 END PROGRAM.
 """
     syntax_path.write_text(syntax, encoding="utf-8")
-    portable_token = "__SPSS_OUTPUT_DIR__"
-    portable_template = syntax.replace(str(output_dir), portable_token)
+    (output_dir / "run_with_spss_external.py").write_text(
+        f'''"""Run only with IBM SPSS Statistics' external Python runtime."""
+import datetime
+import json
+import traceback
+
+import spss
+
+
+status_path = {status_literal}
+metadata = json.loads({metadata_json_literal})
+metadata["engine"] = "IBM SPSS Statistics external Python"
+commands = {commands_literal}
+started = False
+try:
+    spss.StartSPSS()
+    started = True
+    spss.Submit(commands)
+    spss.StopSPSS()
+    started = False
+    metadata["status"] = "complete"
+    metadata["completedAt"] = datetime.datetime.now().isoformat(timespec="seconds")
+except Exception as exc:
+    metadata["status"] = "failed"
+    metadata["error"] = str(exc)
+    metadata["traceback"] = traceback.format_exc()
+    raise
+finally:
+    if started:
+        try:
+            spss.StopSPSS()
+        except Exception:
+            pass
+    with open(status_path, "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+''',
+        encoding="utf-8",
+    )
+    resolved_output = str(output_dir.resolve())
+    forbidden_paths = {
+        resolved_output,
+        resolved_output.replace("\\", "/"),
+        _spss_path(output_dir),
+    }
+    portable_template = build_portable_spss_template(
+        syntax,
+        status_literal=status_literal,
+        spss_output_path=_spss_path(output_dir),
+        forbidden_paths=forbidden_paths,
+    )
     (output_dir / "run_with_spss_python_portable.sps.in").write_text(
         portable_template, encoding="utf-8"
     )
     (output_dir / "prepare_portable_spss_run.py").write_text(
-        """from pathlib import Path
+        f"""import json
+from pathlib import Path
 
 root = Path(__file__).resolve().parent
 template = root / "run_with_spss_python_portable.sps.in"
 destination = root / "run_with_spss_python_portable.sps"
-portable_root = str(root).replace("\\\\", "/")
-if "'" in portable_root or '"' in portable_root:
-    raise SystemExit(
-        "Move the extracted bundle to a folder whose path contains no quote characters."
-    )
+status_path = str(root / "spss_python_status.json")
+portable_root = str(root).replace("\\\\", "/").replace("'", "''")
+status_literal = json.dumps(status_path, ensure_ascii=False)
+command_json_fragment = json.dumps(portable_root, ensure_ascii=False)[1:-1]
 content = template.read_text(encoding="utf-8")
-content = content.replace("__SPSS_OUTPUT_DIR__", portable_root)
+content = content.replace("{PORTABLE_STATUS_LITERAL_TOKEN}", status_literal)
+content = content.replace("{PORTABLE_COMMAND_PATH_TOKEN}", command_json_fragment)
+if "{PORTABLE_STATUS_LITERAL_TOKEN}" in content or "{PORTABLE_COMMAND_PATH_TOKEN}" in content:
+    raise SystemExit("Portable SPSS template replacement was incomplete.")
 destination.write_text(content, encoding="utf-8")
-print(f"Prepared: {destination}")
+print("Portable SPSS run file prepared.")
 print("Open this .sps file in IBM SPSS Statistics and choose Run > All.")
 """,
         encoding="utf-8",
     )
     (output_dir / "PORTABLE_SPSS_README.md").write_text(
-        """# Re-run This Bundle on Another Mac
+        """# Re-run This Bundle with Licensed IBM SPSS Statistics
 
 The automatically executed `run_with_spss_python.sps` records the original
 job path. To prepare an equivalent syntax file after moving or extracting this
-bundle:
+bundle on Windows, macOS, or Linux:
 
 ```bash
-python3 prepare_portable_spss_run.py
+python prepare_portable_spss_run.py
 ```
 
 Open `run_with_spss_python_portable.sps` in a licensed IBM SPSS Statistics
 installation, then choose **Run > All**. Keep `prepared_data.csv` in this same
 folder. The helper only rewrites local paths; it does not upload data or call a
-network service.
+network service. IBM SPSS Statistics and its license are not included in this
+bundle or in Survey Data Workbench by LAI ZEYU.
 """,
         encoding="utf-8",
     )
     return syntax_path
 
 
-def run_spss_automatically(
-    syntax_path: Path,
-    output_dir: Path,
-    timeout_seconds: int = 180,
-) -> dict[str, Any]:
-    status = spss_status()
-    if not status["installed"]:
-        return {"state": "unavailable", "message": status["note"]}
-
-    marker = output_dir / "spss_python_status.json"
-    marker.unlink(missing_ok=True)
-    launch = subprocess.run(
-        ["open", "-a", str(SPSS_APP), str(syntax_path)],
-        text=True,
-        capture_output=True,
-        timeout=20,
-    )
-    if launch.returncode != 0:
-        return {"state": "failed", "message": launch.stderr.strip() or "SPSS 启动失败"}
-
-    apple_script = """
-tell application "IBM SPSS Statistics" to activate
-delay 3
-tell application "System Events"
-  tell process "IBM SPSS Statistics"
-    if not ((exists menu "Run" of menu bar 1) or (exists menu "运行" of menu bar 1)) then
-      return "STARTUP_BLOCKED"
-    end if
-    if exists menu "Run" of menu bar 1 then
-      try
-        click menu item "All" of menu "Run" of menu bar 1
-      on error
-        keystroke "r" using command down
-      end try
-    else
-      try
-        click menu item "全部" of menu "运行" of menu bar 1
-      on error
-        keystroke "r" using command down
-      end try
-    end if
-    return "RUN_SUBMITTED"
-  end tell
-end tell
-"""
-    automation = subprocess.run(
-        ["osascript", "-e", apple_script],
-        text=True,
-        capture_output=True,
-        timeout=30,
-    )
-    if automation.returncode != 0:
-        return {
-            "state": "permission_required",
-            "message": "SPSS 已打开，但 macOS 未允许自动点击。请在“隐私与安全性 > 辅助功能”中允许终端后重试。",
-            "details": automation.stderr.strip(),
-        }
-    if "STARTUP_BLOCKED" in automation.stdout:
-        return {
-            "state": "activation_required",
-            "message": "SPSS 已安装，但没有进入语法编辑器。当前通常需要登录 IBM ID、激活许可证或关闭启动对话框。",
-        }
-
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if marker.exists():
-            try:
-                marker_data = json.loads(marker.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                time.sleep(1)
-                continue
-            state = marker_data.get("status", "complete")
-            return {
-                "state": state,
-                "message": "SPSS 内置 Python 已完成全部分析。" if state == "complete" else "SPSS 执行失败。",
-                "details": marker_data,
-            }
-        time.sleep(1)
-    return {
-        "state": "timeout",
-        "message": "SPSS 已启动，但在等待时间内没有返回完成标记。语法和 Python 预检结果仍可下载。",
-    }
-
-
 def make_bundle(output_dir: Path) -> Path:
-    bundle = output_dir / "SPSS_自动分析完整产出.zip"
+    bundle = output_dir / "Survey_Data_Workbench_完整产出.zip"
     include_suffixes = {
         ".csv",
         ".json",
@@ -821,15 +1006,48 @@ def make_bundle(output_dir: Path) -> Path:
         ".py",
         ".in",
     }
-    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(output_dir.iterdir()):
-            if path == bundle or not path.is_file() or path.suffix.lower() not in include_suffixes:
-                continue
+    sources: list[tuple[Path, int, int]] = []
+    total_bytes = 0
+    for path in sorted(output_dir.iterdir()):
+        if path == bundle or path.name in MACHINE_SPECIFIC_OUTPUTS or path.suffix.lower() not in include_suffixes:
+            continue
+        if path.is_symlink():
+            raise ValueError(f"下载包拒绝符号链接输出：{path.name}")
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        if stat.st_size <= 0 or stat.st_size > MAX_BUNDLE_FILE_BYTES:
+            raise ValueError(f"下载包输出文件大小超出安全范围：{path.name}")
+        total_bytes += stat.st_size
+        if total_bytes > MAX_BUNDLE_TOTAL_BYTES:
+            raise ValueError("下载包源文件总大小超过 2GB 安全上限")
+        sources.append((path, stat.st_size, stat.st_mtime_ns))
+    if not sources or len(sources) > MAX_BUNDLE_ENTRIES:
+        raise ValueError("下载包输出文件数量超出安全范围")
+
+    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+        for path, expected_size, expected_mtime_ns in sources:
             archive.write(path, arcname=path.name)
+            current = path.stat()
+            if current.st_size != expected_size or current.st_mtime_ns != expected_mtime_ns or path.is_symlink():
+                raise ValueError(f"下载包源文件在打包期间发生变化：{path.name}")
+    with zipfile.ZipFile(bundle, "r") as archive:
+        entries = archive.infolist()
+        if [entry.filename for entry in entries] != [path.name for path, _, _ in sources]:
+            raise ValueError("下载包文件清单与冻结源文件不一致")
+        if any(entry.file_size != expected_size for entry, (_, expected_size, _) in zip(entries, sources)):
+            raise ValueError("下载包文件大小与冻结源文件不一致")
+        corrupt = archive.testzip()
+        if corrupt is not None:
+            raise ValueError(f"下载包完整性校验失败：{corrupt}")
     return bundle
 
 
-def output_inventory(output_dir: Path) -> list[dict[str, Any]]:
+def output_inventory(
+    output_dir: Path,
+    *,
+    formal_format_validated: bool = False,
+) -> list[dict[str, Any]]:
     labels = {
         ".spv": "SPSS 输出查看器",
         ".pdf": "SPSS PDF 报告",
@@ -842,13 +1060,20 @@ def output_inventory(output_dir: Path) -> list[dict[str, Any]]:
     }
     files = []
     for path in sorted(output_dir.iterdir()):
-        if not path.is_file():
+        if not path.is_file() or path.is_symlink() or path.name in MACHINE_SPECIFIC_OUTPUTS:
             continue
         files.append(
             {
                 "name": path.name,
                 "size": path.stat().st_size,
                 "kind": labels.get(path.suffix.lower(), "输出文件"),
+                "provenance": (
+                    "ibm_spss_format_validated"
+                    if path.name in EXPECTED_FORMAL_OUTPUTS and formal_format_validated
+                    else "unverified_ibm_spss"
+                    if path.name in EXPECTED_FORMAL_OUTPUTS
+                    else "preview_or_supporting_file"
+                ),
                 "downloadable": True,
             }
         )
@@ -864,9 +1089,9 @@ def execute_workflow(
         if update:
             update(stage, progress, message)
 
-    input_files = [path for path in (job_dir / "input").iterdir() if path.is_file()]
-    if not input_files:
-        raise ValueError("找不到上传的数据文件")
+    input_files = [path for path in (job_dir / "input").iterdir() if path.is_file() and not path.is_symlink()]
+    if len(input_files) != 1:
+        raise ValueError("任务必须且只能包含一个普通上传数据文件")
     input_path = input_files[0]
     output_dir = job_dir / "outputs"
     if output_dir.exists():
@@ -875,7 +1100,7 @@ def execute_workflow(
 
     notify("preparing", 12, "正在读取数据并整理变量")
     frame, _, _ = read_dataset(input_path, config.get("sheet"))
-    frame.columns = [str(column).strip() or f"Column_{index + 1}" for index, column in enumerate(frame.columns)]
+    normalize_dataset_columns(frame)
     constructs = config.get("constructs", [])
     prepared, _, clean_constructs, _ = prepare_data(frame, constructs, output_dir)
     if not clean_constructs:
@@ -891,12 +1116,41 @@ def execute_workflow(
     json_dump(output_dir / "analysis_config.json", config)
 
     spss_result = {"state": "skipped", "message": "本次仅生成语法和 Python 预检结果。"}
-    if config.get("executeSpss", True):
-        notify("spss", 62, "SPSS 正在通过内置 Python 自动执行")
-        spss_result = run_spss_automatically(syntax_path, output_dir)
+    if config.get("executeSpss", False):
+        notify("spss", 62, "正在请求本机 IBM SPSS Statistics 正式执行")
+        try:
+            spss_result = run_spss_automatically(syntax_path, output_dir)
+        except Exception:
+            spss_result = {
+                "state": "failed",
+                "message": "IBM SPSS runner 异常退出；不会报告正式执行成功。",
+            }
+
+    if spss_result.get("state") != "complete":
+        discarded = []
+        for name in EXPECTED_FORMAL_OUTPUTS:
+            path = output_dir / name
+            if path.is_file():
+                path.unlink()
+                discarded.append(name)
+        if discarded:
+            spss_result["discardedPartialOutputs"] = discarded
 
     notify("packaging", 92, "正在整理下载文件")
-    json_dump(output_dir / "execution_status.json", spss_result)
+    public_execution_status = {
+        key: value
+        for key, value in spss_result.items()
+        if key
+        in {
+            "state",
+            "message",
+            "formatIntegrityVerified",
+            "integrationVerified",
+            "semanticValidation",
+            "discardedPartialOutputs",
+        }
+    }
+    json_dump(output_dir / "execution_status.json", public_execution_status)
     bundle = make_bundle(output_dir)
     notify("complete", 100, "分析流程已完成")
     return {
@@ -904,5 +1158,8 @@ def execute_workflow(
         "preview": preview,
         "spss": spss_result,
         "bundle": bundle.name,
-        "files": output_inventory(output_dir),
+        "files": output_inventory(
+            output_dir,
+            formal_format_validated=spss_result.get("state") == "complete",
+        ),
     }

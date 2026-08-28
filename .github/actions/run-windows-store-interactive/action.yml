@@ -1,0 +1,309 @@
+name: Run one reviewed private Windows Store gate
+description: Copy one ACL-bound candidate locally and run two sequential WACK/lifecycle passes on an ephemeral interactive VM.
+
+inputs:
+  repository:
+    required: true
+    description: Exact owner/repository.
+  repository-id:
+    required: true
+    description: Stable repository ID.
+  source-commit:
+    required: true
+    description: Exact current protected-main commit.
+  upstream-run-id:
+    required: true
+    description: Exact private build workflow run ID.
+  upstream-run-attempt:
+    required: true
+    description: Exact private build workflow run attempt.
+  handoff-id:
+    required: true
+    description: Exact private ACL handoff leaf.
+  private-handoff-root:
+    required: true
+    description: Pre-provisioned private UNC handoff root.
+  expected-runner-principal:
+    required: true
+    description: Exact Windows principal granted read access.
+  handoff-builder-principal:
+    required: true
+    description: Exact read-only Store builder principal.
+  handoff-win10-principal:
+    required: true
+    description: Exact read-only Windows 10 verifier principal.
+  handoff-win11-principal:
+    required: true
+    description: Exact read-only Windows 11 verifier principal.
+  handoff-cleanup-principal:
+    required: true
+    description: Exact read/delete-only private-handoff cleanup principal.
+  handoff-owner-principal:
+    required: true
+    description: Non-login immutable handoff owner principal.
+  handoff-harness-path:
+    required: true
+    description: Pre-provisioned signed ACL/owner handoff harness path.
+  handoff-harness-sha256:
+    required: true
+    description: Protected SHA-256 of the ACL/owner handoff harness.
+  os-family:
+    required: true
+    description: Expected Windows caption fragment.
+  os-build:
+    required: true
+    description: Expected Windows build number.
+  os-evidence-slug:
+    required: true
+    description: Fixed public OS label.
+  expected-wack-tool-sha256:
+    required: true
+    description: Environment-approved SHA-256 of appcert.exe.
+  expected-wack-tool-file-version:
+    required: true
+    description: Environment-approved appcert.exe FileVersion.
+  expected-wack-kit-version:
+    required: true
+    description: Environment-approved WACK report VERSION.
+
+runs:
+  using: composite
+  steps:
+    - name: Prove runner identity and copy exact private handoff locally
+      shell: pwsh
+      env:
+        EXPECTED_REPOSITORY: ${{ inputs.repository }}
+        EXPECTED_REPOSITORY_ID: ${{ inputs.repository-id }}
+        EXPECTED_SOURCE_COMMIT: ${{ inputs.source-commit }}
+        EXPECTED_UPSTREAM_RUN_ID: ${{ inputs.upstream-run-id }}
+        EXPECTED_UPSTREAM_RUN_ATTEMPT: ${{ inputs.upstream-run-attempt }}
+        EXPECTED_HANDOFF_ID: ${{ inputs.handoff-id }}
+        PRIVATE_HANDOFF_ROOT: ${{ inputs.private-handoff-root }}
+        EXPECTED_RUNNER_PRINCIPAL: ${{ inputs.expected-runner-principal }}
+        HANDOFF_BUILDER_PRINCIPAL: ${{ inputs.handoff-builder-principal }}
+        HANDOFF_WIN10_PRINCIPAL: ${{ inputs.handoff-win10-principal }}
+        HANDOFF_WIN11_PRINCIPAL: ${{ inputs.handoff-win11-principal }}
+        HANDOFF_CLEANUP_PRINCIPAL: ${{ inputs.handoff-cleanup-principal }}
+        HANDOFF_OWNER_PRINCIPAL: ${{ inputs.handoff-owner-principal }}
+        HANDOFF_HARNESS_PATH: ${{ inputs.handoff-harness-path }}
+        HANDOFF_HARNESS_SHA256: ${{ inputs.handoff-harness-sha256 }}
+        EXPECTED_OS_FAMILY: ${{ inputs.os-family }}
+        EXPECTED_OS_BUILD: ${{ inputs.os-build }}
+        OS_EVIDENCE_SLUG: ${{ inputs.os-evidence-slug }}
+        EXPECTED_WACK_TOOL_SHA256: ${{ inputs.expected-wack-tool-sha256 }}
+        EXPECTED_WACK_TOOL_FILE_VERSION: ${{ inputs.expected-wack-tool-file-version }}
+        EXPECTED_WACK_KIT_VERSION: ${{ inputs.expected-wack-kit-version }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:EXPECTED_REPOSITORY_ID -cne '1311362169' -or
+            $env:EXPECTED_SOURCE_COMMIT -cnotmatch '^[0-9a-f]{40}$' -or
+            $env:EXPECTED_UPSTREAM_RUN_ID -cnotmatch '^\d+$' -or
+            $env:EXPECTED_UPSTREAM_RUN_ATTEMPT -cnotmatch '^\d+$' -or
+            $env:EXPECTED_HANDOFF_ID -cne "store-$($env:EXPECTED_SOURCE_COMMIT)-$($env:EXPECTED_UPSTREAM_RUN_ID)-$($env:EXPECTED_UPSTREAM_RUN_ATTEMPT)" -or
+            $env:PRIVATE_HANDOFF_ROOT -notmatch '^\\\\[^\\]+\\[^\\]+' -or
+            $env:HANDOFF_HARNESS_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $env:OS_EVIDENCE_SLUG -cnotmatch '^windows-(?:10-22h2|11-24h2)$' -or
+            $env:EXPECTED_WACK_TOOL_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $env:EXPECTED_WACK_TOOL_FILE_VERSION -cnotmatch '^\d+(?:\.\d+){1,3}$' -or
+            $env:EXPECTED_WACK_KIT_VERSION -cnotmatch '^\d+(?:\.\d+){1,3}$') {
+          throw 'Private interactive inputs are missing or malformed.'
+        }
+        $handoffPrincipals = @($env:HANDOFF_BUILDER_PRINCIPAL,$env:HANDOFF_WIN10_PRINCIPAL,$env:HANDOFF_WIN11_PRINCIPAL,$env:HANDOFF_CLEANUP_PRINCIPAL,$env:HANDOFF_OWNER_PRINCIPAL)
+        $principalSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($handoffPrincipal in $handoffPrincipals) {
+          if ([string]::IsNullOrWhiteSpace($handoffPrincipal) -or $handoffPrincipal -match '[\r\n]' -or -not $principalSet.Add($handoffPrincipal)) {
+            throw 'Store handoff principals are missing, malformed, or reused.'
+          }
+        }
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or
+            [string]$identity.Name -cne $env:EXPECTED_RUNNER_PRINCIPAL) {
+          throw 'Interactive runner must be the exact approved elevated Windows principal.'
+        }
+        $sessionId = (Get-Process -Id $PID).SessionId
+        if ($sessionId -le 0 -or -not [Environment]::UserInteractive -or
+            @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sessionId }).Count -lt 1) {
+          throw 'WACK requires an active Explorer desktop outside session 0.'
+        }
+        if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitProcess) { throw 'Runner and PowerShell must be x64.' }
+        $os = Get-CimInstance Win32_OperatingSystem
+        if ([string]$os.Caption -notlike "*$($env:EXPECTED_OS_FAMILY)*" -or
+            [string]$os.BuildNumber -cne $env:EXPECTED_OS_BUILD -or [int]$os.ProductType -ne 1) {
+          throw 'Runner does not match the exact reviewed workstation build.'
+        }
+        $developmentMode = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Name AllowDevelopmentWithoutDevLicense -ErrorAction SilentlyContinue
+        if ([int]$developmentMode -ne 1) { throw 'Reviewed WACK VM requires Developer Mode.' }
+
+        $privateRoot = [IO.Path]::GetFullPath($env:PRIVATE_HANDOFF_ROOT).TrimEnd('\')
+        $privatePath = [IO.Path]::GetFullPath((Join-Path $privateRoot $env:EXPECTED_HANDOFF_ID))
+        if ([IO.Directory]::GetParent($privatePath).FullName.TrimEnd('\') -cne $privateRoot) { throw 'Private handoff escaped its exact root.' }
+        $privateItems = @(Get-Item -LiteralPath $privatePath -Force; Get-ChildItem -LiteralPath $privatePath -Recurse -Force)
+        if (@($privateItems | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) { throw 'Private handoff contains a reparse point.' }
+        if ($env:EXPECTED_RUNNER_PRINCIPAL -notin @($env:HANDOFF_WIN10_PRINCIPAL,$env:HANDOFF_WIN11_PRINCIPAL)) { throw 'Interactive identity is not one exact Store verifier principal.' }
+        $handoffHarness = (Resolve-Path -LiteralPath $env:HANDOFF_HARNESS_PATH).Path
+        $harnessItem = Get-Item -LiteralPath $handoffHarness -Force
+        $harnessSignature = Get-AuthenticodeSignature -LiteralPath $handoffHarness
+        $harnessSigner = if ($harnessSignature.SignerCertificate) { $harnessSignature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { '' }
+        if ($harnessItem.PSIsContainer -or ($harnessItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            (Get-FileHash -LiteralPath $handoffHarness -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:HANDOFF_HARNESS_SHA256 -or
+            $harnessSignature.Status -ne 'Valid' -or -not $harnessSignature.TimeStamperCertificate -or $harnessSigner -notin @('LAI ZEYU','来泽宇')) {
+          throw 'Pinned Store handoff ACL harness is absent, linked, unsigned, or hash-mismatched.'
+        }
+        & $handoffHarness assert-handoff `
+          --path $privatePath `
+          --owner $env:HANDOFF_OWNER_PRINCIPAL `
+          --reader $env:HANDOFF_BUILDER_PRINCIPAL `
+          --reader $env:HANDOFF_WIN10_PRINCIPAL `
+          --reader $env:HANDOFF_WIN11_PRINCIPAL `
+          --cleanup $env:HANDOFF_CLEANUP_PRINCIPAL `
+          --forbid-writer `
+          --forbid-broad `
+          --forbid-reparse
+        if ($LASTEXITCODE -ne 0) { throw 'Private Store handoff retained a writer or has a different owner/ACL.' }
+        $aclText = (& icacls.exe $privatePath /t /c | Out-String)
+
+        $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+        $transferRoot = Join-Path $runnerTemp "statflow-store-interactive-${{ github.run_id }}-${{ github.run_attempt }}-$($env:OS_EVIDENCE_SLUG)"
+        $signingRoot = Join-Path $runnerTemp "statflow-msix-test-${{ github.run_id }}-${{ github.run_attempt }}-$($env:OS_EVIDENCE_SLUG)"
+        foreach ($path in @($transferRoot, $signingRoot)) {
+          if ([IO.Directory]::GetParent([IO.Path]::GetFullPath($path)).FullName.TrimEnd('\') -cne $runnerTemp -or (Test-Path -LiteralPath $path)) {
+            throw 'Interactive local state is not one fresh direct RUNNER_TEMP child.'
+          }
+        }
+        # Persist the two deterministic cleanup roots before creating either
+        # directory. A failure anywhere after this point remains cleanable by
+        # the independent always() step.
+        "INTERACTIVE_TRANSFER_ROOT=$transferRoot" >> $env:GITHUB_ENV
+        "TEST_SIGNING_STATE=$signingRoot" >> $env:GITHUB_ENV
+        New-Item -ItemType Directory -Path (Join-Path $transferRoot 'candidate') | Out-Null
+        Copy-Item -Path (Join-Path $privatePath 'candidate\*') -Destination (Join-Path $transferRoot 'candidate') -Recurse -Force
+        Copy-Item -LiteralPath (Join-Path $privatePath 'handoff.v2.json') -Destination (Join-Path $transferRoot 'handoff.v2.json')
+        $handoff = Get-Content -LiteralPath (Join-Path $transferRoot 'handoff.v2.json') -Raw | ConvertFrom-Json
+        $expectedProperties = @('candidateManifestSha256','handoffHarnessSha256','handoffId','handoffKind','identityName','publisher','publisherDisplayName','repository','repositoryId','repositoryOwner','schemaVersion','sourceCommit','storeProductId','workflowRunAttempt','workflowRunId') | Sort-Object
+        if ((Compare-Object $expectedProperties (@($handoff.PSObject.Properties.Name) | Sort-Object)) -or
+            [int]$handoff.schemaVersion -ne 2 -or [string]$handoff.handoffKind -cne 'private-acl-store-candidate' -or
+            [string]$handoff.handoffId -cne $env:EXPECTED_HANDOFF_ID -or [string]$handoff.repository -cne $env:EXPECTED_REPOSITORY -or
+            [string]$handoff.repositoryId -cne $env:EXPECTED_REPOSITORY_ID -or [string]$handoff.sourceCommit -cne $env:EXPECTED_SOURCE_COMMIT -or
+            [string]$handoff.workflowRunId -cne $env:EXPECTED_UPSTREAM_RUN_ID -or
+            [int]$handoff.workflowRunAttempt -ne [int]$env:EXPECTED_UPSTREAM_RUN_ATTEMPT -or
+            [string]$handoff.handoffHarnessSha256 -cne $env:HANDOFF_HARNESS_SHA256 -or
+            [string]$handoff.storeProductId -cne '9NWXQZP2ZG2H' -or
+            [string]$handoff.identityName -cne 'LAIZEYU.SurveyDataWorkbenchbyLAIZEYU' -or
+            [string]$handoff.publisher -cne 'CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8' -or
+            [string]$handoff.publisherDisplayName -cne 'LAI ZEYU') {
+          throw 'Private handoff record does not bind the exact run, commit, repository, and Partner identity.'
+        }
+        $candidateRoot = Join-Path $transferRoot 'candidate'
+        ./scripts/Verify-ArtifactHashes.ps1 -ArtifactRoot $candidateRoot
+        $candidateDigest = (Get-FileHash (Join-Path $candidateRoot 'SHA256SUMS.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($candidateDigest -cne [string]$handoff.candidateManifestSha256) { throw 'Local copy differs from private handoff manifest.' }
+        if ('${{ github.workflow_sha }}' -cne $env:EXPECTED_SOURCE_COMMIT) { throw 'Reviewed workflow definition is not from the exact authorized current-main commit.' }
+        if (Test-Path -LiteralPath ./test-results) { throw 'Refusing to reuse private interactive evidence.' }
+        New-Item -ItemType Directory -Path ./test-results/release-integrity | Out-Null
+        Copy-Item -LiteralPath (Join-Path $candidateRoot 'SHA256SUMS.txt') -Destination ./test-results/release-integrity/SHA256SUMS.txt
+        [IO.File]::WriteAllText((Join-Path (Resolve-Path ./test-results/release-integrity).Path 'candidate-manifest-sha256.txt'), "$candidateDigest`n", [Text.Encoding]::ASCII)
+        $aclDigest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($aclText))).ToLowerInvariant()
+        [ordered]@{
+          schemaVersion = 2
+          evidenceKind = 'same-run-reviewed-workflow-assertion'
+          repository = $env:EXPECTED_REPOSITORY
+          repositoryId = [long]$env:EXPECTED_REPOSITORY_ID
+          sourceCommit = $env:EXPECTED_SOURCE_COMMIT
+          upstreamRunId = $env:EXPECTED_UPSTREAM_RUN_ID
+          upstreamRunAttempt = [int]$env:EXPECTED_UPSTREAM_RUN_ATTEMPT
+          reviewWorkflowRunId = '${{ github.run_id }}'
+          reviewWorkflowRunAttempt = [int]'${{ github.run_attempt }}'
+          reviewWorkflowPath = '.github/workflows/windows-store-interactive.yml'
+          reviewWorkflowSha = '${{ github.workflow_sha }}'
+          handoffId = $env:EXPECTED_HANDOFF_ID
+          privateAclTextSha256 = $aclDigest
+          candidateManifestSha256 = $candidateDigest
+          storeProductId = '9NWXQZP2ZG2H'
+          osEvidenceSlug = $env:OS_EVIDENCE_SLUG
+          osCaption = [string]$os.Caption
+          osBuild = [string]$os.BuildNumber
+          sessionId = $sessionId
+          approvedWackToolSha256 = $env:EXPECTED_WACK_TOOL_SHA256
+          approvedWackToolFileVersion = $env:EXPECTED_WACK_TOOL_FILE_VERSION
+          approvedWackKitVersion = $env:EXPECTED_WACK_KIT_VERSION
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath ./test-results/release-integrity/runner-binding.private.json -Encoding UTF8
+        & icacls.exe $candidateRoot /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)(RX)" /t /c | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not freeze local candidate copy.' }
+        "INTERACTIVE_CANDIDATE_ROOT=$candidateRoot" >> $env:GITHUB_ENV
+        "EXPECTED_CANDIDATE_MANIFEST=$candidateDigest" >> $env:GITHUB_ENV
+
+    - name: Create one non-exportable QA signature for both passes
+      shell: pwsh
+      run: |
+        ./scripts/Prepare-MsixTestCandidate.ps1 `
+          -CandidateRoot $env:INTERACTIVE_CANDIDATE_ROOT `
+          -StateDirectory $env:TEST_SIGNING_STATE `
+          -ExpectedCandidateManifestSha256 $env:EXPECTED_CANDIDATE_MANIFEST `
+          -Publisher 'CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8'
+        $state = Get-Content -LiteralPath (Join-Path $env:TEST_SIGNING_STATE 'state.json') -Raw | ConvertFrom-Json
+        if ([string]$state.signedPackageSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'QA signed package hash is malformed.' }
+        "EXPECTED_SIGNED_QA_MSIX=$([string]$state.signedPackageSha256)" >> $env:GITHUB_ENV
+
+    - name: Interactive WACK and lifecycle pass 1
+      shell: pwsh
+      run: |
+        ./scripts/Test-WindowsSidecar.ps1 -LayoutDirectory (Join-Path $env:INTERACTIVE_CANDIDATE_ROOT 'layout') -DiagnosticsDirectory ./test-results/pass-1
+        ./scripts/Test-MsixLifecycle.ps1 `
+          -CandidateRoot $env:INTERACTIVE_CANDIDATE_ROOT -SigningStatePath "$env:TEST_SIGNING_STATE/state.json" -Pass 1 `
+          -IdentityName 'LAIZEYU.SurveyDataWorkbenchbyLAIZEYU' -Publisher 'CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8' `
+          -PublisherDisplayName 'LAI ZEYU' -DiagnosticsDirectory ./test-results/pass-1 `
+          -ExpectedWackToolSha256 '${{ inputs.expected-wack-tool-sha256 }}' `
+          -ExpectedWackToolFileVersion '${{ inputs.expected-wack-tool-file-version }}' `
+          -ExpectedWackKitVersion '${{ inputs.expected-wack-kit-version }}'
+        $state = Get-Content -LiteralPath (Join-Path $env:TEST_SIGNING_STATE 'state.json') -Raw | ConvertFrom-Json
+        if ((Get-FileHash (Join-Path $env:INTERACTIVE_CANDIDATE_ROOT 'SHA256SUMS.txt') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_CANDIDATE_MANIFEST -or
+            (Get-FileHash -LiteralPath ([string]$state.signedPackagePath) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_SIGNED_QA_MSIX) {
+          throw 'Pass 1 changed the private candidate or one-time signed QA MSIX.'
+        }
+
+    - name: Interactive WACK and lifecycle pass 2 on identical bytes
+      shell: pwsh
+      run: |
+        ./scripts/Test-WindowsSidecar.ps1 -LayoutDirectory (Join-Path $env:INTERACTIVE_CANDIDATE_ROOT 'layout') -DiagnosticsDirectory ./test-results/pass-2
+        ./scripts/Test-MsixLifecycle.ps1 `
+          -CandidateRoot $env:INTERACTIVE_CANDIDATE_ROOT -SigningStatePath "$env:TEST_SIGNING_STATE/state.json" -Pass 2 `
+          -IdentityName 'LAIZEYU.SurveyDataWorkbenchbyLAIZEYU' -Publisher 'CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8' `
+          -PublisherDisplayName 'LAI ZEYU' -DiagnosticsDirectory ./test-results/pass-2 `
+          -ExpectedWackToolSha256 '${{ inputs.expected-wack-tool-sha256 }}' `
+          -ExpectedWackToolFileVersion '${{ inputs.expected-wack-tool-file-version }}' `
+          -ExpectedWackKitVersion '${{ inputs.expected-wack-kit-version }}'
+        $state = Get-Content -LiteralPath (Join-Path $env:TEST_SIGNING_STATE 'state.json') -Raw | ConvertFrom-Json
+        if ((Get-FileHash (Join-Path $env:INTERACTIVE_CANDIDATE_ROOT 'SHA256SUMS.txt') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_CANDIDATE_MANIFEST -or
+            (Get-FileHash -LiteralPath ([string]$state.signedPackagePath) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_SIGNED_QA_MSIX) {
+          throw 'Pass 2 did not use identical candidate and QA-signed MSIX bytes.'
+        }
+
+    - name: Remove QA identity and local private candidate copy
+      if: always()
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Continue'
+        $errors = [Collections.Generic.List[string]]::new()
+        $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+        $deterministicSigningRoot = Join-Path $runnerTemp "statflow-msix-test-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.os-evidence-slug }}"
+        $signingRoot = if ($env:TEST_SIGNING_STATE) { [IO.Path]::GetFullPath($env:TEST_SIGNING_STATE) } else { $deterministicSigningRoot }
+        try {
+          if (Test-Path -LiteralPath $signingRoot) {
+            ./scripts/Cleanup-MsixTestCandidate.ps1 -StateDirectory $signingRoot
+          }
+        } catch { $errors.Add("QA signing cleanup: $($_.Exception.Message)") }
+        try {
+          $deterministicTransferRoot = Join-Path $runnerTemp "statflow-store-interactive-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.os-evidence-slug }}"
+          $root = if ($env:INTERACTIVE_TRANSFER_ROOT) { [IO.Path]::GetFullPath($env:INTERACTIVE_TRANSFER_ROOT) } else { $deterministicTransferRoot }
+          if (Test-Path -LiteralPath $root) {
+            if ([IO.Directory]::GetParent($root).FullName.TrimEnd('\') -cne $runnerTemp -or (Split-Path -Leaf $root) -notlike 'statflow-store-interactive-*') { throw 'local transfer root escaped RUNNER_TEMP' }
+            $items = @(Get-Item -LiteralPath $root -Force; Get-ChildItem -LiteralPath $root -Recurse -Force)
+            if (@($items | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) { throw 'local transfer root contains a reparse point' }
+            & icacls.exe $root /inheritance:e /grant:r "$($env:USERNAME):(OI)(CI)(F)" /t /c | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'could not restore local cleanup ACL' }
+            Remove-Item -LiteralPath $root -Recurse -Force
+            if (Test-Path -LiteralPath $root) { throw 'local transfer root remains' }
+          }
+        } catch { $errors.Add("Local private handoff cleanup: $($_.Exception.Message)") }
+        if ($errors.Count -gt 0) { throw ($errors -join [Environment]::NewLine) }
