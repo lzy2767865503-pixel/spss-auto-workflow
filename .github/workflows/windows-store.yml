@@ -35,7 +35,7 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Set up exact .NET SDK
-        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 8.0.424
       - name: Install exact source-gate dependencies
@@ -222,7 +222,7 @@ jobs:
           node-version: 22.18.0
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 8.0.424
       - name: Build and freeze the only candidate
